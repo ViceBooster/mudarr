@@ -2116,7 +2116,7 @@ router.get("/:id/hls/:segment", async (req, res) => {
     if (!stats.isFile()) {
       return res.status(404).json({ error: "Segment not found" });
     }
-    recordStreamBandwidth(stats.size);
+    res.setHeader("Content-Length", stats.size);
   } catch {
     return res.status(404).json({ error: "Segment not found" });
   }
@@ -2130,7 +2130,17 @@ router.get("/:id/hls/:segment", async (req, res) => {
     res.setHeader("Content-Type", "application/octet-stream");
   }
   res.setHeader("Cache-Control", "no-store");
-  res.sendFile(segmentPath);
+  const segmentStream = fs.createReadStream(segmentPath);
+  segmentStream.on("data", (chunk: Buffer) => recordStreamBandwidth(chunk.length));
+  segmentStream.on("error", () => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to stream segment" });
+    }
+  });
+  res.on("close", () => {
+    segmentStream.destroy();
+  });
+  segmentStream.pipe(res as unknown as NodeJS.WritableStream);
 });
 
 router.get("/:streamId/items/:itemId/stream", async (req, res) => {

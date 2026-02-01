@@ -5,6 +5,7 @@ type BandwidthSample = {
 
 const bandwidthSamples: BandwidthSample[] = [];
 const bandwidthWindowMs = 15000;
+const minBandwidthWindowMs = 1000;
 
 const pruneBandwidthSamples = (now: number) => {
   const cutoff = now - bandwidthWindowMs;
@@ -23,6 +24,9 @@ export const recordStreamBandwidth = (bytes: number) => {
 export const getStreamBandwidthBps = () => {
   const now = Date.now();
   pruneBandwidthSamples(now);
+  if (bandwidthSamples.length === 0) return 0;
   const totalBytes = bandwidthSamples.reduce((sum, sample) => sum + sample.bytes, 0);
-  return Math.max(0, totalBytes / (bandwidthWindowMs / 1000));
+  const oldestTimestamp = bandwidthSamples[0]!.timestamp;
+  const windowMs = Math.max(minBandwidthWindowMs, now - oldestTimestamp);
+  return Math.max(0, totalBytes / (windowMs / 1000));
 };

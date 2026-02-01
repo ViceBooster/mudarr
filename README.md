@@ -4,6 +4,24 @@
 
 Self-hosted music video automation inspired by Sonarr/Radarr.
 
+## UI examples
+
+### Dashboard
+
+![Dashboard](apps/web/public/dashboard.png)
+
+### Streams
+
+![Streams](apps/web/public/streams.png)
+
+### Player
+
+![Player](apps/web/public/player.png)
+
+### Settings
+
+![Settings](apps/web/public/setting.png)
+
 ## Architecture
 
 - `apps/web` (port `3000`): web UI
