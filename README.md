@@ -1,4 +1,4 @@
-![Mudarr logo](mudarr.png)
+![Mudarr logo](apps/web/public/mudarr_cropped.png)
 
 # Mudarr
 
