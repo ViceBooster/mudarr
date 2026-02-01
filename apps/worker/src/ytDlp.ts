@@ -1,0 +1,398 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import fsSync from "node:fs";
+import path from "node:path";
+
+const qualityFormat = (quality?: string | null) => {
+  // Prefer H.264 video and AAC/M4A audio to minimize re-encoding
+  // Format: bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo+bestaudio/best
+  const h264Preference = "[vcodec^=avc1]";
+  const aacPreference = "[acodec^=mp4a]";
+  
+  if (!quality) {
+    return `bestvideo${h264Preference}+bestaudio${aacPreference}/bestvideo+bestaudio/best`;
+  }
+  if (quality === "144p") {
+    return `bestvideo[height<=144]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=144]+bestaudio/best[height<=144]`;
+  }
+  if (quality === "240p") {
+    return `bestvideo[height<=240]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=240]+bestaudio/best[height<=240]`;
+  }
+  if (quality === "360p") {
+    return `bestvideo[height<=360]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=360]+bestaudio/best[height<=360]`;
+  }
+  if (quality === "480p") {
+    return `bestvideo[height<=480]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=480]+bestaudio/best[height<=480]`;
+  }
+  if (quality === "720p") {
+    return `bestvideo[height<=720]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=720]+bestaudio/best[height<=720]`;
+  }
+  if (quality === "1080p") {
+    return `bestvideo[height<=1080]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=1080]+bestaudio/best[height<=1080]`;
+  }
+  if (quality === "1440p") {
+    return `bestvideo[height<=1440]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=1440]+bestaudio/best[height<=1440]`;
+  }
+  if (quality === "2160p") {
+    return `bestvideo[height<=2160]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=2160]+bestaudio/best[height<=2160]`;
+  }
+  if (quality === "4320p") {
+    return `bestvideo[height<=4320]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=4320]+bestaudio/best[height<=4320]`;
+  }
+  return `bestvideo${h264Preference}+bestaudio${aacPreference}/bestvideo+bestaudio/best`;
+};
+
+const preferOfficialVideoQuery = (query: string) => {
+  const normalized = query.trim();
+  if (!normalized) return normalized;
+  if (/official\s+video/i.test(normalized)) {
+    return normalized;
+  }
+  return `${normalized} official video`;
+};
+
+const isYoutubeId = (value: string) => /^[a-zA-Z0-9_-]{11}$/.test(value.trim());
+
+const buildSearchTarget = (query: string) => {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (/^ytsearch/i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (isYoutubeId(trimmed)) {
+    return `https://www.youtube.com/watch?v=${trimmed}`;
+  }
+  return `ytsearch1:${preferOfficialVideoQuery(trimmed)}`;
+};
+
+export const buildYtDlpArgs = (query: string, outputDir: string, quality?: string | null) => [
+  "-f",
+  qualityFormat(quality),
+  "-o",
+    path.join(outputDir, "%(title)s.%(ext)s"),
+  buildSearchTarget(query)
+];
+
+type YtDlpOutputFormat = "original" | "mp4-remux" | "mp4-recode";
+
+type YtDlpOptions = {
+  cookiesPath?: string | null;
+  cookiesFromBrowser?: string | null;
+  cookiesHeader?: string | null;
+  outputFormat?: YtDlpOutputFormat | null;
+};
+
+const normalizeOutputFormat = (raw?: string | null) => {
+  if (!raw) {
+    return null;
+  }
+  if (raw === "original" || raw === "mp4-remux" || raw === "mp4-recode") {
+    return raw;
+  }
+  return null;
+};
+
+const resolveYtDlpPath = () => {
+  const fromEnv = process.env.YT_DLP_PATH?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  const binName = process.platform === "win32" ? "yt-dlp.cmd" : "yt-dlp";
+  const localBin = path.resolve(process.cwd(), "node_modules", ".bin", binName);
+  if (fsSync.existsSync(localBin)) {
+    return localBin;
+  }
+  return "yt-dlp";
+};
+
+const spawnYtDlp = (
+  command: string,
+  args: string[],
+  onFallback: (error: NodeJS.ErrnoException) => void,
+  resolve: () => void,
+  reject: (error: Error) => void,
+  onStdoutLine?: (line: string) => void
+) => {
+  const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderr = "";
+  let stdoutBuffer = "";
+  let stderrBuffer = "";
+  const splitOutputLines = (buffer: string, chunk: string) => {
+    const combined = buffer + chunk;
+    const parts = combined.split(/\r\n|\n|\r/);
+    return { lines: parts.slice(0, -1), remainder: parts.at(-1) ?? "" };
+  };
+    child.stderr.on("data", (chunk) => {
+    const text = chunk.toString();
+    stderr += text;
+    if (!onStdoutLine) {
+      return;
+    }
+    const result = splitOutputLines(stderrBuffer, text);
+    stderrBuffer = result.remainder;
+    for (const line of result.lines) {
+      onStdoutLine(line);
+    }
+  });
+  if (onStdoutLine) {
+    child.stdout.on("data", (chunk) => {
+      const result = splitOutputLines(stdoutBuffer, chunk.toString());
+      stdoutBuffer = result.remainder;
+      for (const line of result.lines) {
+        onStdoutLine(line);
+      }
+    });
+  }
+
+  child.on("error", (error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      onFallback(error as NodeJS.ErrnoException);
+      return;
+    }
+    reject(error as Error);
+  });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+      }
+    });
+};
+
+const buildArgsWithOptions = (
+  query: string,
+  outputDir: string,
+  quality?: string | null,
+  options?: YtDlpOptions
+) => {
+  const args = [
+    "--progress",
+    "--newline",
+    "--progress-template",
+    "download:download:%(progress._percent_str)s",
+    "--progress-template",
+    "postprocess:postprocess:%(progress._percent_str)s",
+    "--print",
+    "after_move:filepath",
+    "-f",
+    qualityFormat(quality),
+    "-o",
+    path.join(outputDir, "%(title)s.%(ext)s"),
+    // Download optimizations
+    "--concurrent-fragments", "5",  // Download multiple fragments in parallel
+    "--buffer-size", "16K",          // Increase buffer size for faster downloads
+    "--http-chunk-size", "10M"       // Download in larger chunks
+  ];
+  
+  // Always merge to MP4 container
+  args.push("--merge-output-format", "mp4");
+  
+  // ALWAYS convert to H.264/AAC for optimal streaming compatibility
+  // This ensures all downloads work with HLS copy mode
+  if (options?.outputFormat === "mp4-remux") {
+    // Remux: Try to avoid re-encoding if already H.264/AAC
+    args.push("--remux-video", "mp4");
+  } else if (options?.outputFormat === "mp4-recode") {
+    // Force re-encode: Always re-encode to H.264/AAC
+    args.push("--recode-video", "mp4");
+  }
+  // else: Default behavior - yt-dlp will download and merge intelligently
+  
+  // Apply post-processing to ensure H.264 video + AAC audio in all cases
+  // Use faster encoding preset for speed, with reasonable quality
+  // - preset veryfast: Much faster than default medium preset
+  // - crf 23: Default quality (lower = better quality but slower)
+  // - movflags +faststart: Optimize for web streaming
+  // - c:v libx264 / c:a aac: Ensure H.264/AAC even if source is different
+  args.push(
+    "--postprocessor-args",
+    "ffmpeg:-c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 192k -movflags +faststart"
+  );
+  
+  if (options?.cookiesPath) {
+    args.push("--cookies", options.cookiesPath);
+  } else if (options?.cookiesFromBrowser) {
+    args.push("--cookies-from-browser", options.cookiesFromBrowser);
+  } else if (options?.cookiesHeader) {
+    const trimmed = options.cookiesHeader.trim();
+    const headerValue = trimmed.toLowerCase().startsWith("cookie:")
+      ? trimmed.slice(trimmed.indexOf(":") + 1).trim()
+      : trimmed;
+    const singleLineValue = headerValue.split(/\\r?\\n/)[0]?.trim();
+    if (singleLineValue) {
+      args.push("--add-header", `Cookie: ${singleLineValue}`);
+    }
+  }
+  const searchTarget = buildSearchTarget(query);
+  if (searchTarget) {
+    args.push(searchTarget);
+  }
+  return args;
+};
+
+export async function runYtDlp(
+  query: string,
+  outputDir: string,
+  quality?: string | null,
+  onProgress?: (percent: number, stage?: "download" | "processing") => void,
+  options?: YtDlpOptions,
+  onStage?: (stage: "download" | "processing" | "finalizing", detail?: string) => void
+) {
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const envCookiesPath = process.env.YT_DLP_COOKIES?.trim() || null;
+  const envCookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim() || null;
+  const envOutputFormat = normalizeOutputFormat(process.env.YT_DLP_OUTPUT_FORMAT?.trim() || null);
+  const cookiesPath =
+    typeof options?.cookiesPath !== "undefined" ? options.cookiesPath : envCookiesPath;
+  const cookiesFromBrowser =
+    typeof options?.cookiesFromBrowser !== "undefined"
+      ? options.cookiesFromBrowser
+      : envCookiesFromBrowser;
+  const cookiesHeader =
+    typeof options?.cookiesHeader !== "undefined" ? options.cookiesHeader : null;
+  const outputFormat =
+    typeof options?.outputFormat !== "undefined" ? options.outputFormat : envOutputFormat;
+  const ytDlpPath = resolveYtDlpPath();
+  const debugOutput = process.env.YT_DLP_DEBUG_OUTPUT?.trim() === "1";
+
+  const runWithQuery = (searchQuery: string) =>
+    new Promise<string[]>((resolve, reject) => {
+      const args = buildArgsWithOptions(searchQuery, outputDir, quality, {
+        cookiesPath,
+        cookiesFromBrowser,
+        cookiesHeader,
+        outputFormat
+      });
+      const printedPaths: string[] = [];
+      let lastStage: string | null = null;
+      let lastDetail: string | null = null;
+      const emitStage = (stage: "download" | "processing" | "finalizing", detail?: string) => {
+        if (!onStage) return;
+        if (lastStage === stage && lastDetail === (detail ?? null)) return;
+        lastStage = stage;
+        lastDetail = detail ?? null;
+        onStage(stage, detail);
+      };
+      const parsePercent = (text: string) => {
+        const percentMatch = text.match(/([0-9]+(?:\\.[0-9]+)?)%/);
+        if (!percentMatch) {
+          return null;
+        }
+        const percent = Number(percentMatch[1]);
+        return Number.isNaN(percent) ? null : percent;
+      };
+      const handleLine = (line: string) => {
+        const trimmed = line.trim();
+        if (debugOutput && trimmed) {
+          console.log(`[yt-dlp] ${trimmed}`);
+        }
+        if (!trimmed) {
+          return;
+        }
+        if (trimmed.startsWith("download:")) {
+          const percent = parsePercent(trimmed);
+          if (percent !== null) {
+            emitStage("download", "Downloading");
+            onProgress?.(percent, "download");
+            return;
+          }
+          emitStage("download", "Downloading");
+        }
+        if (trimmed.startsWith("postprocess:")) {
+          const percent = parsePercent(trimmed);
+          if (percent !== null) {
+            emitStage("processing", "Encoding");
+            onProgress?.(percent, "processing");
+            return;
+          }
+          emitStage("processing", "Processing");
+        }
+        if (/^(?:\d+(?:\.\d+)?%|NA|N\/A)$/i.test(trimmed)) {
+          const percent = parsePercent(trimmed);
+          if (percent !== null) {
+            const stage = lastStage === "processing" ? "processing" : "download";
+            emitStage(stage, stage === "processing" ? "Encoding" : "Downloading");
+            onProgress?.(percent, stage);
+            return;
+          }
+          if (lastStage === "processing") {
+            emitStage("processing", "Processing");
+            return;
+          }
+        }
+        const isDownloadLine = /download/i.test(trimmed);
+        if (isDownloadLine) {
+          const percent = parsePercent(trimmed);
+          if (percent !== null) {
+            emitStage("download", "Downloading");
+            onProgress?.(percent, "download");
+            return;
+          }
+          emitStage("download", "Downloading");
+        }
+        if (/post-processing|merging formats|remux|re-encode|ffmpeg|merger|extractaudio/i.test(trimmed)) {
+          const detail = trimmed.includes("remux")
+            ? "Remuxing"
+            : trimmed.includes("re-encode") || trimmed.includes("ffmpeg")
+            ? "Encoding"
+            : trimmed.includes("merger")
+            ? "Merging"
+            : "Processing";
+          emitStage("processing", detail);
+        } else if (/deleting original file|fixup|finalizing/i.test(trimmed)) {
+          emitStage("finalizing", "Finalizing");
+        }
+        if (trimmed.startsWith(outputDir) && fsSync.existsSync(trimmed)) {
+          printedPaths.push(trimmed);
+        }
+      };
+      spawnYtDlp(
+        ytDlpPath,
+        args,
+        () => {
+          const python = process.env.YT_DLP_PYTHON?.trim() || "python3";
+          const pythonArgs = ["-m", "yt_dlp", ...args];
+          spawnYtDlp(
+            python,
+            pythonArgs,
+            () => {
+              reject(
+                new Error(
+                  "yt-dlp not found. Install it (brew install yt-dlp) or set YT_DLP_PATH. You can also install via python3 -m pip install yt-dlp and set YT_DLP_PYTHON=python3."
+                )
+              );
+            },
+            () => resolve(printedPaths),
+            reject,
+            handleLine
+          );
+        },
+        () => resolve(printedPaths),
+        reject,
+        handleLine
+      );
+    });
+
+  const preferredQuery = preferOfficialVideoQuery(query);
+  if (preferredQuery !== query) {
+    try {
+      const preferredPaths = await runWithQuery(preferredQuery);
+      if (preferredPaths.length > 0) {
+        return preferredPaths;
+      }
+    } catch {
+      // fall back to original query
+    }
+  }
+
+  return runWithQuery(query);
+}

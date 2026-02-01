@@ -1,0 +1,40 @@
+import { Router } from "express";
+import artists from "./artists.js";
+import genres from "./genres.js";
+import lists from "./lists.js";
+import sync from "./sync.js";
+import downloads from "./downloads.js";
+import activity from "./activity.js";
+import plex from "./plex.js";
+import search from "./search.js";
+import albums from "./albums.js";
+import tracks from "./tracks.js";
+import settings from "./settings.js";
+import playlists from "./playlists.js";
+import stats from "./stats.js";
+import streams from "./streams.js";
+import youtube from "./youtube.js";
+import auth from "./auth.js";
+import setup from "./setup.js";
+
+const router = Router();
+
+router.use("/artists", artists);
+router.use("/genres", genres);
+router.use("/lists", lists);
+router.use("/sync", sync);
+router.use("/downloads", downloads);
+router.use("/activity", activity);
+router.use("/plex", plex);
+router.use("/search", search);
+router.use("/albums", albums);
+router.use("/tracks", tracks);
+router.use("/settings", settings);
+router.use("/playlists", playlists);
+router.use("/stats", stats);
+router.use("/streams", streams);
+router.use("/youtube", youtube);
+router.use("/auth", auth);
+router.use("/setup", setup);
+
+export default router;

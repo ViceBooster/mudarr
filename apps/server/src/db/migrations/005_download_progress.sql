@@ -1,0 +1,1 @@
+ALTER TABLE download_jobs ADD COLUMN IF NOT EXISTS progress_percent INTEGER DEFAULT 0;

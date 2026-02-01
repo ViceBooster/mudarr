@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS genre_import_jobs (
+  id UUID PRIMARY KEY,
+  genre_id INTEGER REFERENCES genres(id) ON DELETE SET NULL,
+  genre_name TEXT NOT NULL,
+  source TEXT NOT NULL,
+  import_limit INTEGER NOT NULL,
+  import_mode TEXT NOT NULL,
+  import_quality TEXT NOT NULL,
+  auto_download BOOLEAN NOT NULL DEFAULT FALSE,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  status TEXT NOT NULL DEFAULT 'queued',
+  processed INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  imported INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  errors INTEGER NOT NULL DEFAULT 0,
+  error_samples JSONB,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

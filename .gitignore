@@ -1,0 +1,12 @@
+node_modules
+.env
+.env.*
+.DS_Store
+dist
+build
+coverage
+
+# app data
+media
+storage
+apps/worker/data

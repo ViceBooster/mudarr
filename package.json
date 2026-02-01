@@ -1,0 +1,21 @@
+{
+  "name": "mudarr",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,worker,web \"npm:dev --workspace apps/server\" \"npm:dev --workspace apps/worker\" \"npm:dev --workspace apps/web\"",
+    "build": "npm run build --workspaces",
+    "lint": "npm run lint --workspaces",
+    "format": "prettier -w .",
+    "db:migrate": "npm run db:migrate --workspace apps/server",
+    "db:seed": "npm run db:seed --workspace apps/server"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.5"
+  }
+}

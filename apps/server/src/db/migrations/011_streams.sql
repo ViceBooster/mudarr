@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS streams (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS stream_items (
+  id SERIAL PRIMARY KEY,
+  stream_id INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS stream_items_stream_id ON stream_items (stream_id, position);

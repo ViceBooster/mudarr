@@ -1,0 +1,22 @@
+{
+  "name": "@mudarr/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "lint": "echo 'no lint configured'",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "bullmq": "^5.12.1",
+    "dotenv": "^16.4.5",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.10.2",
+    "tsx": "^4.15.5",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}

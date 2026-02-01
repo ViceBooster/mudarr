@@ -1,0 +1,12 @@
+{
+  "name": "@mudarr/shared",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "echo 'no lint configured'"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
