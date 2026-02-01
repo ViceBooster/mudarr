@@ -64,7 +64,7 @@ router.patch("/:id", async (req, res) => {
         "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
         ["download_queued", `Queued download: ${query}`, { downloadJobId: jobResult.rows[0].id }]
       );
-      await downloadQueue.add("download", {
+      await downloadQueue.add("download-check", {
         downloadJobId: jobResult.rows[0].id,
         query,
         source: "monitor",

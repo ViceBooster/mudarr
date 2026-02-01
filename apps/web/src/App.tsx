@@ -27,6 +27,7 @@ const settingsTabs = [
   { id: "api-keys", label: "API keys" },
   { id: "streaming-options", label: "Streaming" },
   { id: "downloads", label: "Downloads" },
+  { id: "search", label: "Search" },
   { id: "youtube", label: "YouTube" },
   { id: "plex", label: "Plex" }
 ] as const;
@@ -142,6 +143,14 @@ const formatBandwidth = (bytesPerSecond: number | null | undefined) => {
   const display = bitsPerSecond / Math.pow(1000, index);
   const rounded = display.toFixed(display >= 10 || index === 0 ? 0 : 1);
   return `${rounded} ${units[index]}`;
+};
+
+const buildDownloadProgress = (downloaded: number, monitored: number) => {
+  const safeMonitored = Number.isFinite(monitored) ? Math.max(0, Math.floor(monitored)) : 0;
+  const safeDownloaded = Number.isFinite(downloaded) ? Math.max(0, Math.floor(downloaded)) : 0;
+  const percent =
+    safeMonitored > 0 ? Math.round((safeDownloaded / safeMonitored) * 100) : 0;
+  return { monitored: safeMonitored, downloaded: safeDownloaded, percent };
 };
 
 const downsampleSeries = (values: number[], targetPoints: number) => {
@@ -313,6 +322,8 @@ type Artist = {
   created_at: string;
   genres: { id: number; name: string }[];
   has_downloads?: boolean;
+  monitored_count?: number | null;
+  downloaded_count?: number | null;
 };
 
 type Genre = {
@@ -426,6 +437,10 @@ type YoutubeSettings = {
 
 type DownloadSettings = {
   concurrency: number | null;
+};
+
+type SearchSettings = {
+  skipNonOfficialMusicVideos: boolean;
 };
 
 type YoutubeSearchResult = {
@@ -615,6 +630,7 @@ type TrackDetail = {
   downloaded?: boolean;
   download_status?: string | null;
   progress_percent?: number | null;
+  download_error?: string | null;
 };
 
 type AlbumDetail = {
@@ -696,6 +712,28 @@ const EditIcon = () => (
   >
     <path d="M12 20h9" />
     <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+  </svg>
+);
+
+const CheckIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="3">
+    <path d="M5 13l4 4L19 7" />
+  </svg>
+);
+
+const SearchIcon = () => (
+  <svg
+    viewBox="0 0 24 24"
+    className="h-4 w-4"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <circle cx="11" cy="11" r="7" />
+    <path d="M21 21l-4.35-4.35" />
   </svg>
 );
 
@@ -1135,7 +1173,13 @@ export default function App() {
   const [isResyncing, setIsResyncing] = useState(false);
   const [expandedAlbumIds, setExpandedAlbumIds] = useState<number[]>([]);
   const [dashboardView, setDashboardView] = useState<"posters" | "list">("posters");
+  const [dashboardSelectMode, setDashboardSelectMode] = useState(false);
   const [selectedArtistIds, setSelectedArtistIds] = useState<number[]>([]);
+  const [deleteArtistModal, setDeleteArtistModal] = useState<{
+    open: boolean;
+    artistIds: number[];
+    label: string;
+  }>({ open: false, artistIds: [], label: "" });
   const [bulkImportMode, setBulkImportMode] =
     useState<ArtistPreference["import_mode"]>("discography");
   const [bulkQuality, setBulkQuality] = useState<ArtistPreference["quality"]>("1080p");
@@ -1164,6 +1208,11 @@ export default function App() {
   const [downloadSaveStatus, setDownloadSaveStatus] = useState<
     "idle" | "saving" | "saved" | "error"
   >("idle");
+  const [searchSettings, setSearchSettings] = useState<SearchSettings | null>(null);
+  const [skipNonOfficialMusicVideos, setSkipNonOfficialMusicVideos] = useState(false);
+  const [searchSaveStatus, setSearchSaveStatus] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
   const [integrationsStatus, setIntegrationsStatus] =
     useState<IntegrationSettings | null>(null);
   const [audiodbApiKey, setAudiodbApiKey] = useState("");
@@ -1181,6 +1230,7 @@ export default function App() {
   >("idle");
   const [connectionsModalStreamId, setConnectionsModalStreamId] = useState<number | null>(null);
   const [restartingStreamIds, setRestartingStreamIds] = useState<number[]>([]);
+  const [rescanningStreamIds, setRescanningStreamIds] = useState<number[]>([]);
   const [playingStreamId, setPlayingStreamId] = useState<number | null>(null);
   const [streamPlayerNotice, setStreamPlayerNotice] = useState<string | null>(null);
   const [currentPlaybackInfo, setCurrentPlaybackInfo] = useState<TrackMediaInfo | null>(null);
@@ -1195,6 +1245,7 @@ export default function App() {
   const youtubeSaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamTokenSaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const downloadSaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [playbackQueue, setPlaybackQueue] = useState<PlaybackItem[]>([]);
   const [playbackIndex, setPlaybackIndex] = useState(0);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
@@ -1205,6 +1256,8 @@ export default function App() {
   const [draggedPlaylistIndex, setDraggedPlaylistIndex] = useState<number | null>(null);
   const playerRef = useRef<HTMLDivElement | null>(null);
   const streamMenuRef = useRef<HTMLDivElement | null>(null);
+  const artistSettingsRef = useRef<HTMLDivElement | null>(null);
+  const artistTracksRef = useRef<HTMLDivElement | null>(null);
   const playerDragOffset = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const streamPlayerRef = useRef<HTMLVideoElement | null>(null);
   const streamHlsRef = useRef<any>(null);
@@ -1496,6 +1549,7 @@ export default function App() {
         integrationsData,
         streamSettingsData,
         downloadSettingsData,
+        searchSettingsData,
         generalSettingsData,
         adminSettingsData
       ] = await Promise.all([
@@ -1509,6 +1563,7 @@ export default function App() {
         apiGet<IntegrationSettings>("/api/settings/integrations"),
         apiGet<StreamSettings>("/api/settings/streams"),
         apiGet<DownloadSettings>("/api/settings/downloads"),
+        apiGet<SearchSettings>("/api/settings/search"),
         apiGet<GeneralSettings>("/api/settings/general"),
         apiGet<AdminSettings>("/api/settings/admin")
       ]);
@@ -1522,11 +1577,13 @@ export default function App() {
       setIntegrationsStatus(integrationsData);
       setStreamSettings(streamSettingsData);
       setDownloadSettings(downloadSettingsData);
+      setSearchSettings(searchSettingsData);
       setYoutubeCookiesPath(youtubeData?.cookiesPath ?? "");
       setYoutubeCookiesBrowser(youtubeData?.cookiesFromBrowser ?? "");
       setYoutubeCookiesHeader(youtubeData?.cookiesHeader ?? "");
       setYoutubeOutputFormat(youtubeData?.outputFormat ?? "original");
       setDownloadConcurrency(downloadSettingsData?.concurrency ?? 2);
+      setSkipNonOfficialMusicVideos(searchSettingsData?.skipNonOfficialMusicVideos ?? false);
       setAudiodbApiKey(integrationsData?.audiodbApiKey ?? "");
       setLastfmApiKey(integrationsData?.lastfmApiKey ?? "");
       setStreamToken(streamSettingsData?.token ?? "");
@@ -2136,6 +2193,45 @@ export default function App() {
     cancelEditStream();
   };
 
+  const updateEditingStreamTracks = (stream: StreamSummary) => {
+    if (editingStreamId !== stream.id) return;
+    setEditingStreamTracks(
+      stream.items.map((item) => ({
+        id: item.track_id,
+        title: item.title,
+        album_title: item.album_title,
+        artist_name: item.artist_name
+      }))
+    );
+    setEditingStreamSelectedIds([]);
+    editingStreamSelectionAnchor.current = null;
+    setEditingStreamStatus(stream.status);
+  };
+
+  const rescanStream = async (streamId: number, artistIds?: number[]) => {
+    setError(null);
+    setRescanningStreamIds((prev) => (prev.includes(streamId) ? prev : [...prev, streamId]));
+    try {
+      const payload = artistIds && artistIds.length > 0 ? { artistIds } : {};
+      const result = await apiPost<StreamSummary>(`/api/streams/${streamId}/rescan`, payload);
+      updateEditingStreamTracks(result);
+      await loadStreams();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to rescan stream");
+    } finally {
+      setRescanningStreamIds((prev) => prev.filter((id) => id !== streamId));
+    }
+  };
+
+  const rescanEditingStream = async () => {
+    if (!editingStreamId) return;
+    if (editingStreamArtistIds.length === 0) {
+      setError("Select at least one artist to rescan.");
+      return;
+    }
+    await rescanStream(editingStreamId, editingStreamArtistIds);
+  };
+
   const runStreamAction = async (
     streamId: number,
     action: "start" | "stop" | "reboot"
@@ -2522,6 +2618,32 @@ export default function App() {
     return artistDetail.albums.some((album) => album.tracks.some((track) => track.downloaded));
   }, [artistDetail]);
 
+  const scrollToArtistSettings = () => {
+    artistSettingsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const scrollToArtistTracks = () => {
+    artistTracksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const artistDownloadProgress = useMemo(() => {
+    if (!artistDetail) {
+      return buildDownloadProgress(0, 0);
+    }
+    let monitored = 0;
+    let downloaded = 0;
+    for (const album of artistDetail.albums) {
+      for (const track of album.tracks) {
+        if (!track.monitored) continue;
+        monitored += 1;
+        if (track.downloaded) {
+          downloaded += 1;
+        }
+      }
+    }
+    return buildDownloadProgress(downloaded, monitored);
+  }, [artistDetail]);
+
   useEffect(() => {
     if (!canUseApi) return;
     if (isArtistDetailRoute && artistRouteId) {
@@ -2757,6 +2879,13 @@ export default function App() {
     const hasActiveDownloads = activeDownloadCounts.total > 0;
     const shouldPollFast = hasActiveDownloads || location.pathname === "/downloads";
     const currentMode = shouldPollFast ? "fast" : "slow";
+
+    const pollDownloads = () => {
+      void loadDownloadsOnly();
+      if (hasActiveDownloads) {
+        void loadArtistsOnly();
+      }
+    };
     
     // Create or recreate interval when mode changes
     if (downloadsIntervalRef.current === null || currentMode !== lastDownloadPollMode.current) {
@@ -2765,11 +2894,11 @@ export default function App() {
       }
     const intervalMs = shouldPollFast ? 2000 : 15000;
       downloadsIntervalRef.current = window.setInterval(() => {
-      void loadDownloadsOnly();
+        pollDownloads();
     }, intervalMs);
       lastDownloadPollMode.current = currentMode;
     }
-    void loadDownloadsOnly();
+    pollDownloads();
     
     return () => {
       if (downloadsIntervalRef.current !== null) {
@@ -2789,12 +2918,48 @@ export default function App() {
     });
   }, [lists, normalizedSearch]);
 
-  const localArtistMatches = useMemo(() => {
+  type LocalSearchMatch = Pick<Artist, "id" | "name" | "image_url" | "genres">;
+  const localSearchMatches = useMemo<LocalSearchMatch[]>(() => {
     if (!showSearchPanel) return [];
-    return artists
-      .filter((artist) => matchesArtistQuery(artist.name, normalizedSearch))
-      .slice(0, 5);
-  }, [artists, normalizedSearch, showSearchPanel]);
+    const byId = new Map<number, LocalSearchMatch>();
+    const localResults = searchResults.filter((result) => result.source === "local");
+    for (const result of localResults) {
+      const id = Number(result.id);
+      if (!Number.isFinite(id)) {
+        continue;
+      }
+      const existing = artists.find((artist) => artist.id === id);
+      if (existing) {
+        byId.set(id, {
+          id: existing.id,
+          name: existing.name,
+          image_url: existing.image_url,
+          genres: existing.genres
+        });
+      } else {
+        byId.set(id, {
+          id,
+          name: result.name,
+          image_url: result.thumb,
+          genres: []
+        });
+      }
+    }
+    if (byId.size === 0) {
+      artists
+        .filter((artist) => matchesArtistQuery(artist.name, normalizedSearch))
+        .slice(0, 5)
+        .forEach((artist) => {
+          byId.set(artist.id, {
+            id: artist.id,
+            name: artist.name,
+            image_url: artist.image_url,
+            genres: artist.genres
+          });
+        });
+    }
+    return Array.from(byId.values());
+  }, [artists, normalizedSearch, searchResults, showSearchPanel]);
 
   const sortedArtists = useMemo(() => {
     const data = [...filteredArtists];
@@ -2813,7 +2978,56 @@ export default function App() {
 
   const dashboardArtists = useMemo(() => sortedArtists, [sortedArtists]);
 
+  const toggleDashboardSelectMode = () => {
+    setDashboardSelectMode((prev) => {
+      const next = !prev;
+      if (!next) {
+        setSelectedArtistIds([]);
+      }
+      return next;
+    });
+  };
+
+  const openDeleteArtistModal = (artistIds: number[], label: string) => {
+    if (artistIds.length === 0) return;
+    setDeleteArtistModal({ open: true, artistIds, label });
+  };
+
+  const closeDeleteArtistModal = () => {
+    setDeleteArtistModal({ open: false, artistIds: [], label: "" });
+  };
+
+  const performDeleteArtists = async (artistIds: number[]) => {
+    await Promise.all(artistIds.map((artistId) => apiDelete(`/api/artists/${artistId}`)));
+    clearArtistSelection();
+    await loadAll();
+    if (selectedArtistId && artistIds.includes(selectedArtistId)) {
+      setArtistDetail(null);
+      setSelectedArtistId(null);
+      if (isArtistDetailRoute) {
+        navigate("/");
+      }
+    }
+  };
+
+  const confirmDeleteArtistModal = async () => {
+    const ids = deleteArtistModal.artistIds;
+    if (ids.length === 0) {
+      closeDeleteArtistModal();
+      return;
+    }
+    closeDeleteArtistModal();
+    try {
+      await performDeleteArtists(ids);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete artist(s)");
+    }
+  };
+
   const toggleArtistSelection = (artistId: number) => {
+    if (!dashboardSelectMode) {
+      return;
+    }
     setSelectedArtistIds((prev) =>
       prev.includes(artistId) ? prev.filter((id) => id !== artistId) : [...prev, artistId]
     );
@@ -2823,7 +3037,31 @@ export default function App() {
     setSelectedArtistIds([]);
   };
 
+  useEffect(() => {
+    if (!deleteArtistModal.open) {
+      return;
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDeleteArtistModal();
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void confirmDeleteArtistModal();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [deleteArtistModal.open]);
+
   const toggleSelectAllArtists = () => {
+    if (!dashboardSelectMode) {
+      return;
+    }
     if (selectedArtistIds.length === dashboardArtists.length) {
       setSelectedArtistIds([]);
       return;
@@ -3096,12 +3334,9 @@ export default function App() {
     await loadAll();
   };
 
-  const deleteArtist = async (id: number) => {
-    await apiDelete(`/api/artists/${id}`);
-    await loadAll();
-    if (isArtistDetailRoute && selectedArtistId === id) {
-      navigate("/");
-    }
+  const deleteArtist = async (id: number, name?: string) => {
+    const label = name?.trim() ? `"${name.trim()}"` : "this artist";
+    openDeleteArtistModal([id], label);
   };
 
   const cancelArtistImport = async (jobId: number, artistName: string) => {
@@ -3366,17 +3601,10 @@ export default function App() {
 
   const deleteSelectedArtists = async () => {
     if (selectedArtistIds.length === 0) return;
-    const confirmed = window.confirm(
-      `Delete ${selectedArtistIds.length} artist(s)? This cannot be undone.`
+    openDeleteArtistModal(
+      selectedArtistIds,
+      `${selectedArtistIds.length} artist(s)`
     );
-    if (!confirmed) return;
-    await Promise.all(selectedArtistIds.map((artistId) => apiDelete(`/api/artists/${artistId}`)));
-    clearArtistSelection();
-    await loadAll();
-    if (selectedArtistId && selectedArtistIds.includes(selectedArtistId)) {
-      setArtistDetail(null);
-      setSelectedArtistId(null);
-    }
   };
 
   const clearLogs = async () => {
@@ -3585,6 +3813,29 @@ export default function App() {
     } catch (err) {
       setDownloadSaveStatus("error");
       setError(err instanceof Error ? err.message : "Failed to save download settings");
+    }
+  };
+
+  const saveSearchSettings = async () => {
+    setError(null);
+    setSearchSaveStatus("saving");
+    if (searchSaveTimeout.current) {
+      clearTimeout(searchSaveTimeout.current);
+      searchSaveTimeout.current = null;
+    }
+    try {
+      const result = await apiPut<SearchSettings>("/api/settings/search", {
+        skipNonOfficialMusicVideos
+      });
+      setSearchSettings(result);
+      setSkipNonOfficialMusicVideos(result.skipNonOfficialMusicVideos);
+      setSearchSaveStatus("saved");
+      searchSaveTimeout.current = setTimeout(() => {
+        setSearchSaveStatus("idle");
+      }, 3000);
+    } catch (err) {
+      setSearchSaveStatus("error");
+      setError(err instanceof Error ? err.message : "Failed to save search settings");
     }
   };
 
@@ -4042,7 +4293,12 @@ export default function App() {
     () => searchResults.filter((result) => result.source !== "local"),
     [searchResults]
   );
-  const hasSearchResults = localArtistMatches.length > 0 || externalSearchResults.length > 0;
+  const artistByName = useMemo(() => {
+    const map = new Map<string, Artist>();
+    artists.forEach((artist) => map.set(artist.name.toLowerCase(), artist));
+    return map;
+  }, [artists]);
+  const hasSearchResults = localSearchMatches.length > 0 || externalSearchResults.length > 0;
   const searchSourcesLabel = useMemo(() => "AudioDB", []);
   const searchPlaceholder = useMemo(
     () => `Search artists in ${searchSourcesLabel}...`,
@@ -4489,12 +4745,12 @@ export default function App() {
                     {searchLoading && (
                       <div className="px-4 py-3 text-sm text-slate-500">Searching...</div>
                     )}
-                    {localArtistMatches.length > 0 && (
+                    {localSearchMatches.length > 0 && (
                       <div className="px-4 pt-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                         In your library
                       </div>
                     )}
-                    {localArtistMatches.map((artist) => (
+                    {localSearchMatches.map((artist) => (
                       <div
                         key={artist.id}
                         className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50"
@@ -4534,7 +4790,9 @@ export default function App() {
                       </div>
                     )}
                     {!searchLoading &&
-                      externalSearchResults.map((result) => (
+                      externalSearchResults.map((result) => {
+                        const existingArtist = artistByName.get(result.name.toLowerCase());
+                        return (
                         <div
                           key={result.id}
                           className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50"
@@ -4563,14 +4821,28 @@ export default function App() {
                               {[result.genre, result.style].filter(Boolean).join(" • ")}
                             </div>
                           </div>
-                          <button
-                            onClick={() => openImportModal(result)}
-                            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
-                          >
-                            Add
-                          </button>
+                          {existingArtist ? (
+                            <button
+                              onClick={() => {
+                                setSearchTerm("");
+                                setSearchResults([]);
+                                void openArtistPage(existingArtist.id);
+                              }}
+                              className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              View
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => openImportModal(result)}
+                              className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+                            >
+                              Add
+                            </button>
+                          )}
                         </div>
-                      ))}
+                      );
+                    })}
                     {!searchLoading && !hasSearchResults && (
                       <div className="px-4 py-3 text-sm text-slate-500">
                         No matches yet. Try the full artist name, e.g. &quot;Linkin Park&quot;.
@@ -4716,6 +4988,16 @@ export default function App() {
                         Posters
                       </button>
                       <button
+                        onClick={toggleDashboardSelectMode}
+                        className={`rounded-md border px-2 py-1 ${
+                          dashboardSelectMode
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            : "border-slate-200 hover:bg-slate-50"
+                        }`}
+                      >
+                        Select
+                      </button>
+                      <button
                         onClick={() => setDashboardView("list")}
                         className={`rounded-md border px-2 py-1 ${
                           dashboardView === "list"
@@ -4800,6 +5082,7 @@ export default function App() {
                     )}
 
                     <div className="rounded-lg border border-slate-100 p-4">
+                      {dashboardSelectMode && (
                       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                         <label className="flex items-center gap-2 text-xs text-slate-600">
                           <input
@@ -4813,6 +5096,7 @@ export default function App() {
                           Select all
                         </label>
                       </div>
+                      )}
 
                       {dashboardArtists.length === 0 ? (
                         <div className="py-6 text-center text-sm text-slate-500">
@@ -4820,22 +5104,17 @@ export default function App() {
                         </div>
                       ) : dashboardView === "posters" ? (
                         <div className="mt-4 grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-                          {dashboardArtists.map((artist) => (
+                          {dashboardArtists.map((artist) => {
+                            const progress = buildDownloadProgress(
+                              artist.downloaded_count ?? 0,
+                              artist.monitored_count ?? 0
+                            );
+                            return (
                             <div
                               key={artist.id}
                               className="group overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm"
                             >
                               <div className="relative aspect-[4/5] bg-slate-100">
-                                <input
-                                  type="checkbox"
-                                  checked={selectedArtistIds.includes(artist.id)}
-                                  onChange={() => toggleArtistSelection(artist.id)}
-                                  className="absolute left-2 top-2 h-4 w-4 rounded border-slate-300"
-                                />
-                                <button
-                                  onClick={() => openArtistPage(artist.id)}
-                                  className="h-full w-full"
-                                >
                                   {artist.image_url ? (
                                     <img
                                       src={artist.image_url}
@@ -4847,71 +5126,99 @@ export default function App() {
                                       No artwork
                                     </div>
                                   )}
-                                </button>
+                                {dashboardSelectMode && selectedArtistIds.includes(artist.id) && (
+                                  <div className="absolute right-2 top-2 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-white shadow">
+                                    <CheckIcon />
                               </div>
-                          <div className="px-3 py-3">
-                            <div className="text-sm font-semibold text-slate-900">
-                              {artist.name}
-                            </div>
-                            <div className="mt-1 text-xs text-slate-500">
-                              {artist.genres.length > 0
-                                ? artist.genres.map((g) => g.name).join(", ")
-                                : "No genres"}
-                            </div>
-                            <div className="mt-3 flex flex-wrap gap-2">
+                                )}
+                                <button
+                                  onClick={() =>
+                                    dashboardSelectMode
+                                      ? toggleArtistSelection(artist.id)
+                                      : openArtistPage(artist.id)
+                                  }
+                                  className="absolute inset-0 z-10"
+                                  aria-label={`Open ${artist.name}`}
+                                />
+                                <div className="absolute inset-x-0 bottom-0 z-20 flex items-center justify-center gap-2 bg-gradient-to-t from-slate-900/70 via-slate-900/40 to-transparent px-2 pb-2 pt-6 opacity-0 transition group-hover:opacity-100">
                               {artist.has_downloads && (
                                 <button
                                   onClick={() => playArtistFromDashboard(artist.id)}
-                                  className="rounded-md border border-indigo-200 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-50"
+                                      title="Play"
+                                      className="rounded-full bg-white/90 p-1.5 text-slate-700 shadow-sm transition hover:bg-white"
                                 >
-                                  Play
+                                      <PlayIcon />
                                 </button>
                               )}
                               {hasActivePlayback && artist.has_downloads && (
                                 <button
                                   onClick={() => enqueueArtistFromDashboard(artist.id)}
-                                  className="rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+                                      title="Queue"
+                                      className="rounded-full bg-white/90 p-1.5 text-slate-700 shadow-sm transition hover:bg-white"
                                 >
-                                  Queue
+                                      <ListIcon />
                                 </button>
                               )}
                               <button
                                 onClick={() => openArtistPage(artist.id)}
-                                className="rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500"
+                                    title="Edit"
+                                    className="rounded-full bg-white/90 p-1.5 text-slate-700 shadow-sm transition hover:bg-white"
                               >
-                                Edit
+                                    <EditIcon />
                               </button>
                               <button
                                 onClick={() => openArtistPage(artist.id)}
-                                className="rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+                                    title="Search"
+                                    className="rounded-full bg-white/90 p-1.5 text-slate-700 shadow-sm transition hover:bg-white"
                               >
-                                Search
+                                    <SearchIcon />
                               </button>
                               <button
-                                onClick={() => deleteArtist(artist.id)}
-                                className="rounded-md border border-rose-200 px-2.5 py-1 text-[11px] font-semibold text-rose-600 hover:bg-rose-50"
+                                    onClick={() => deleteArtist(artist.id, artist.name)}
+                                    title="Delete"
+                                    className="rounded-full bg-white/90 p-1.5 text-rose-600 shadow-sm transition hover:bg-white"
                               >
-                                Delete
+                                    <TrashIcon />
                               </button>
                             </div>
                           </div>
+                              <div className="relative h-4 w-full bg-slate-100">
+                                <div
+                                  className="h-full bg-emerald-500"
+                                  style={{ width: `${progress.percent}%` }}
+                                />
+                                <div className="absolute inset-0 flex items-center justify-center text-[10px] font-semibold text-slate-700">
+                                  {progress.downloaded}/{progress.monitored}
                             </div>
-                          ))}
+                              </div>
+                          <div className="px-3 py-3">
+                            <div className="text-sm font-semibold text-slate-900">
+                              {artist.name}
+                            </div>
+                          </div>
+                            </div>
+                          );
+                          })}
                         </div>
                       ) : (
                         <div className="mt-4 overflow-x-auto">
                           <table className="w-full text-left text-sm">
                             <thead className="text-xs uppercase text-slate-500">
                               <tr>
-                                <th className="py-2">Select</th>
+                                {dashboardSelectMode && <th className="py-2">Select</th>}
                                 <th className="py-2">Artist</th>
-                                <th className="py-2">Genres</th>
                                 <th className="py-2">Added</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {dashboardArtists.map((artist) => (
+                              {dashboardArtists.map((artist) => {
+                                const progress = buildDownloadProgress(
+                                  artist.downloaded_count ?? 0,
+                                  artist.monitored_count ?? 0
+                                );
+                                return (
                                 <tr key={artist.id} className="border-t border-slate-100">
+                                  {dashboardSelectMode && (
                                   <td className="py-2">
                                     <input
                                       type="checkbox"
@@ -4919,17 +5226,29 @@ export default function App() {
                                       onChange={() => toggleArtistSelection(artist.id)}
                                     />
                                   </td>
+                                  )}
                                   <td className="py-2 font-medium text-slate-900">
                                     <div className="flex items-center gap-3">
+                                      <div className="flex flex-col items-center gap-0 w-16">
                                       {artist.image_url ? (
                                         <img
                                           src={artist.image_url}
                                           alt={artist.name}
-                                          className="h-9 w-9 rounded-full object-cover"
+                                            className="h-10 w-10 rounded-full object-cover"
                                         />
                                       ) : (
-                                        <div className="h-9 w-9 rounded-full bg-slate-200" />
-                                      )}
+                                          <div className="h-10 w-10 rounded-full bg-slate-200" />
+                                        )}
+                                        <div className="relative h-4 w-full overflow-hidden rounded-full bg-slate-100">
+                                          <div
+                                            className="h-full bg-emerald-500"
+                                            style={{ width: `${progress.percent}%` }}
+                                          />
+                                          <div className="absolute inset-0 flex items-center justify-center text-[9px] font-semibold text-slate-700">
+                                            {progress.downloaded}/{progress.monitored}
+                                          </div>
+                                        </div>
+                                      </div>
                                       <div className="flex flex-col gap-1">
                                         <button
                                           onClick={() => openArtistPage(artist.id)}
@@ -4958,16 +5277,12 @@ export default function App() {
                                       </div>
                                     </div>
                                   </td>
-                                  <td className="py-2 text-slate-600">
-                                    {artist.genres.length > 0
-                                      ? artist.genres.map((g) => g.name).join(", ")
-                                      : "-"}
-                                  </td>
                                   <td className="py-2 text-slate-500">
                                     {new Date(artist.created_at).toLocaleDateString()}
                                   </td>
                                 </tr>
-                              ))}
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -5043,23 +5358,67 @@ export default function App() {
                       )}
                       <div className="flex flex-wrap items-center justify-between gap-4">
                         <div className="flex items-center gap-4">
+                          <div className="flex flex-col items-center gap-0 w-32">
+                            <div className="group relative h-16 w-16 overflow-hidden rounded-full">
                           {artistDetail.artist.image_url ? (
                             <img
                               src={artistDetail.artist.image_url}
                               alt={artistDetail.artist.name}
-                              className="h-16 w-16 rounded-full object-cover"
+                                  className="h-full w-full object-cover"
                             />
                           ) : (
-                            <div className="h-16 w-16 rounded-full bg-slate-200" />
-                          )}
+                                <div className="h-full w-full bg-slate-200" />
+                              )}
+                              <div className="absolute inset-0 flex items-center justify-center bg-slate-900/45 opacity-0 transition group-hover:opacity-100">
+                                <div className="grid grid-cols-2 gap-1">
+                                  <button
+                                    onClick={() => playArtistFromDashboard(artistDetail.artist.id)}
+                                    disabled={!artistHasDownloads}
+                                    title="Play"
+                                    className="rounded-md bg-white/90 p-1 text-slate-700 shadow-sm transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    <PlayIcon />
+                                  </button>
+                                  <button
+                                    onClick={scrollToArtistSettings}
+                                    title="Edit"
+                                    className="rounded-md bg-white/90 p-1 text-slate-700 shadow-sm transition hover:bg-white"
+                                  >
+                                    <EditIcon />
+                                  </button>
+                                  <button
+                                    onClick={scrollToArtistTracks}
+                                    title="Search"
+                                    className="rounded-md bg-white/90 p-1 text-slate-700 shadow-sm transition hover:bg-white"
+                                  >
+                                    <SearchIcon />
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      deleteArtist(artistDetail.artist.id, artistDetail.artist.name)
+                                    }
+                                    title="Delete"
+                                    className="rounded-md bg-white/90 p-1 text-rose-600 shadow-sm transition hover:bg-white"
+                                  >
+                                    <TrashIcon />
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="relative h-4 w-full overflow-hidden rounded-full bg-slate-100">
+                              <div
+                                className="h-full bg-emerald-500"
+                                style={{ width: `${artistDownloadProgress.percent}%` }}
+                              />
+                              <div className="absolute inset-0 flex items-center justify-center text-[10px] font-semibold text-slate-700">
+                                {artistDownloadProgress.downloaded}/
+                                {artistDownloadProgress.monitored}
+                              </div>
+                            </div>
+                          </div>
                           <div>
                             <div className="text-2xl font-semibold text-slate-900">
                               {artistDetail.artist.name}
-                            </div>
-                            <div className="text-sm text-slate-500">
-                              {artistDetail.artist.genres.length > 0
-                                ? artistDetail.artist.genres.map((genre) => genre.name).join(", ")
-                                : "No genres"}
                             </div>
                             <div className="mt-1 text-sm text-slate-500">
                               {artistDetail.albums.length} albums ·{" "}
@@ -5088,7 +5447,9 @@ export default function App() {
                           {isResyncing ? "Resyncing..." : "Resync albums"}
                         </button>
                         <button
-                          onClick={() => deleteArtist(artistDetail.artist.id)}
+                          onClick={() =>
+                            deleteArtist(artistDetail.artist.id, artistDetail.artist.name)
+                          }
                           className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50"
                         >
                           Remove artist
@@ -5096,7 +5457,7 @@ export default function App() {
                       </div>
                       </div>
 
-                      <div className="mt-6 grid gap-3 md:grid-cols-3">
+                      <div ref={artistSettingsRef} className="mt-6 grid gap-3 md:grid-cols-3">
                         <div>
                           <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                             Import mode
@@ -5173,7 +5534,7 @@ export default function App() {
                     )}
                     </div>
 
-                    <div className="space-y-4">
+                    <div ref={artistTracksRef} className="space-y-4">
                       {artistDetail.albums.length === 0 && (
                         <div className="rounded-xl bg-white p-4 text-sm text-slate-500 shadow-sm">
                           No albums found.
@@ -5294,6 +5655,12 @@ export default function App() {
                                   const isDownloaded = track.downloaded;
                                   const isDownloading = track.download_status === "downloading";
                                   const isQueued = track.download_status === "queued";
+                                  const isFailed = track.download_status === "failed";
+                                  const skipMessage = track.download_error?.trim() ?? "";
+                                  const isSkipped =
+                                    track.monitored &&
+                                    isFailed &&
+                                    skipMessage.toLowerCase().startsWith("skipped");
                                   return (
                                     <div
                                       key={track.id}
@@ -5304,6 +5671,14 @@ export default function App() {
                                         {track.title}
                                       </div>
                                       <div className="flex flex-wrap items-center gap-2">
+                                        {isSkipped && (
+                                          <span
+                                            title={skipMessage || "Skipped"}
+                                            className="rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700"
+                                          >
+                                            Skipped
+                                          </span>
+                                        )}
                                         {isDownloaded && (
                                           <>
                                             <button
@@ -5344,7 +5719,7 @@ export default function App() {
                                             }
                                             className="rounded-md border border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-50"
                                           >
-                                            Download
+                                            {isSkipped ? "Force download" : "Download"}
                                           </button>
                                         )}
                                         {!isDownloaded && !isDownloading && !isQueued && (
@@ -5480,7 +5855,7 @@ export default function App() {
                                   )}
                                   <button
                                     className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-                                    onClick={() => deleteArtist(artist.id)}
+                                    onClick={() => deleteArtist(artist.id, artist.name)}
                                   >
                                     Delete
                                   </button>
@@ -6230,6 +6605,7 @@ export default function App() {
                 const isEditing = editingStreamId === stream.id;
                 const resolutionSummary = getResolutionSummary(stream.items);
                 const isRestarting = restartingStreamIds.includes(stream.id);
+                const isRescanning = rescanningStreamIds.includes(stream.id);
                 const isMenuOpen = streamMenuId === stream.id;
                 const iconValue = stream.icon?.trim();
                 const isIconUrl = iconValue ? /^https?:\/\//i.test(iconValue) : false;
@@ -6374,6 +6750,17 @@ export default function App() {
                                   <RefreshIcon />
                                 </span>
                                 Restart stream
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setStreamMenuId(null);
+                                  void rescanStream(stream.id);
+                                }}
+                                disabled={isRescanning}
+                                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                <SearchIcon />
+                                {isRescanning ? "Rescanning..." : "Rescan tracks"}
                               </button>
                               <button
                                 onClick={() => {
@@ -6845,6 +7232,20 @@ export default function App() {
                     Changes apply immediately to the stream playlist.
                   </p>
                   <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={rescanEditingStream}
+                      disabled={
+                        editingStreamArtistIds.length === 0 ||
+                        (editingStreamId !== null &&
+                          rescanningStreamIds.includes(editingStreamId))
+                      }
+                      className="flex items-center gap-2 rounded-lg border border-indigo-200 px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <SearchIcon />
+                      {editingStreamId !== null && rescanningStreamIds.includes(editingStreamId)
+                        ? "Rescanning..."
+                        : "Rescan artists"}
+                    </button>
                     <button
                       onClick={cancelEditStream}
                       className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50"
@@ -7511,6 +7912,57 @@ export default function App() {
                 </div>
                 )}
 
+                {activeSettingsTab === "search" && (
+                  <div className="rounded-xl bg-white p-4 shadow-sm">
+                    <h3 className="text-sm font-semibold text-slate-700">Search options</h3>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Fine-tune how auto downloads match YouTube results.
+                    </p>
+                    <div className="mt-4">
+                      <label className="flex items-start gap-3 rounded-lg border border-slate-200 px-3 py-3 text-sm text-slate-600">
+                        <input
+                          type="checkbox"
+                          checked={skipNonOfficialMusicVideos}
+                          onChange={(event) =>
+                            setSkipNonOfficialMusicVideos(event.currentTarget.checked)
+                          }
+                          className="mt-0.5 h-4 w-4"
+                        />
+                        <span>
+                          <span className="block font-semibold text-slate-700">
+                            Skip non-official music videos
+                          </span>
+                          <span className="mt-1 block text-xs text-slate-500">
+                            When enabled, monitored/auto downloads are skipped unless the YouTube
+                            title includes &quot;Official Music Video&quot;. Manual downloads are
+                            not affected.
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                    <div className="mt-4 flex flex-wrap items-center gap-3">
+                      <button
+                        onClick={saveSearchSettings}
+                        disabled={searchSaveStatus === "saving"}
+                        className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                      >
+                        {searchSaveStatus === "saving" ? "Saving..." : "Save search options"}
+                      </button>
+                      {searchSaveStatus === "saved" && (
+                        <span className="text-xs text-emerald-600">Saved</span>
+                      )}
+                      {searchSaveStatus === "error" && (
+                        <span className="text-xs text-rose-600">Save failed</span>
+                      )}
+                      {searchSettings && (
+                        <span className="text-xs text-slate-500">
+                          Current: {searchSettings.skipNonOfficialMusicVideos ? "On" : "Off"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                )}
+
                 {activeSettingsTab === "youtube" && (
                   <div className="rounded-xl bg-white p-4 shadow-sm">
                   <h3 className="text-sm font-semibold text-slate-700">YouTube (yt-dlp)</h3>
@@ -8040,6 +8492,39 @@ export default function App() {
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+          )}
+          {deleteArtistModal.open && (
+            <div
+              className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/60 px-4 py-6"
+              onClick={closeDeleteArtistModal}
+            >
+              <div
+                className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="text-lg font-semibold text-slate-900">
+                  {deleteArtistModal.artistIds.length > 1 ? "Delete artists?" : "Delete artist?"}
+                </div>
+                <p className="mt-2 text-sm text-slate-600">
+                  This will remove {deleteArtistModal.label} and any downloaded files. This action
+                  cannot be undone.
+                </p>
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    onClick={closeDeleteArtistModal}
+                    className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void confirmDeleteArtistModal()}
+                    className="rounded-lg bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-500"
+                  >
+                    Delete
+                  </button>
                 </div>
               </div>
             </div>

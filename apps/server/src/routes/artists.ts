@@ -26,19 +26,31 @@ const resolveLatestAlbumIds = (albums: Array<{ id: string; year: number | null }
 router.get("/", async (_req, res) => {
   const result = await pool.query(
     `SELECT a.id, a.name, a.image_url, a.created_at,
-      EXISTS (
-        SELECT 1
-        FROM albums al
-        JOIN tracks t ON t.album_id = al.id
-        JOIN videos v ON v.track_id = t.id AND v.status = 'completed'
-        WHERE al.artist_id = a.id
-      ) AS has_downloads,
-      COALESCE(json_agg(json_build_object('id', g.id, 'name', g.name))
-      FILTER (WHERE g.id IS NOT NULL), '[]') AS genres
+      COALESCE(stats.has_downloads, false) AS has_downloads,
+      COALESCE(stats.monitored_count, 0) AS monitored_count,
+      COALESCE(stats.downloaded_count, 0) AS downloaded_count,
+      COALESCE(genres.genres, '[]'::jsonb) AS genres
      FROM artists a
-     LEFT JOIN artist_genres ag ON ag.artist_id = a.id
-     LEFT JOIN genres g ON g.id = ag.genre_id
-     GROUP BY a.id
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(DISTINCT t.id) FILTER (WHERE t.monitored)::int AS monitored_count,
+         COUNT(DISTINCT t.id) FILTER (WHERE t.monitored AND v.id IS NOT NULL)::int AS downloaded_count,
+         (COUNT(DISTINCT t.id) FILTER (WHERE v.id IS NOT NULL) > 0) AS has_downloads
+       FROM albums al
+       LEFT JOIN tracks t ON t.album_id = al.id
+       LEFT JOIN videos v ON v.track_id = t.id AND v.status = 'completed'
+       WHERE al.artist_id = a.id
+     ) stats ON true
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(
+         jsonb_agg(DISTINCT jsonb_build_object('id', g.id, 'name', g.name))
+           FILTER (WHERE g.id IS NOT NULL),
+         '[]'::jsonb
+       ) AS genres
+       FROM artist_genres ag
+       LEFT JOIN genres g ON g.id = ag.genre_id
+       WHERE ag.artist_id = a.id
+     ) genres ON true
      ORDER BY a.name ASC`
   );
   res.json(result.rows);
@@ -256,7 +268,7 @@ router.get("/:id", async (req, res) => {
     albumIds.length === 0
       ? { rows: [] }
       : await pool.query(
-          "SELECT t.id, t.album_id, t.title, t.track_no, t.monitored, CASE WHEN v.id IS NULL THEN FALSE ELSE TRUE END AS downloaded, dj.status AS download_status, dj.progress_percent FROM tracks t LEFT JOIN videos v ON v.track_id = t.id AND v.status = 'completed' LEFT JOIN LATERAL (SELECT status, progress_percent FROM download_jobs WHERE track_id = t.id ORDER BY created_at DESC LIMIT 1) dj ON true WHERE t.album_id = ANY($1::int[]) ORDER BY t.track_no ASC NULLS LAST, t.title ASC",
+          "SELECT t.id, t.album_id, t.title, t.track_no, t.monitored, CASE WHEN v.id IS NULL THEN FALSE ELSE TRUE END AS downloaded, dj.status AS download_status, dj.progress_percent, dj.error AS download_error FROM tracks t LEFT JOIN videos v ON v.track_id = t.id AND v.status = 'completed' LEFT JOIN LATERAL (SELECT status, progress_percent, error FROM download_jobs WHERE track_id = t.id ORDER BY created_at DESC LIMIT 1) dj ON true WHERE t.album_id = ANY($1::int[]) ORDER BY t.track_no ASC NULLS LAST, t.title ASC",
           [albumIds]
         );
 
@@ -270,6 +282,7 @@ router.get("/:id", async (req, res) => {
     downloaded: boolean;
     download_status: string | null;
     progress_percent: number | null;
+    download_error: string | null;
   }>) {
     const list = tracksByAlbum.get(track.album_id) ?? [];
     list.push(track);
@@ -489,7 +502,7 @@ router.patch("/:id/albums/monitor", async (req, res) => {
         "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
         ["download_queued", `Queued download: ${query}`, { downloadJobId: jobResult.rows[0].id }]
       );
-      await downloadQueue.add("download", {
+      await downloadQueue.add("download-check", {
         downloadJobId: jobResult.rows[0].id,
         query,
         source: "monitor",

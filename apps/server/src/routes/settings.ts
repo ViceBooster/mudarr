@@ -43,6 +43,10 @@ const downloadSettingsSchema = z.object({
   concurrency: z.coerce.number().int().min(1).max(10).nullable().optional()
 });
 
+const searchSettingsSchema = z.object({
+  skipNonOfficialMusicVideos: z.boolean().optional()
+});
+
 const generalSettingsSchema = z.object({
   mediaRoot: z.string().trim().min(1),
   domain: z.string().trim().optional().nullable(),
@@ -148,6 +152,36 @@ router.put("/downloads", async (req, res) => {
     ["downloads", { concurrency }]
   );
   res.json({ concurrency });
+});
+
+router.get("/search", async (_req, res) => {
+  const result = await pool.query("SELECT value FROM settings WHERE key = $1", ["search"]);
+  const stored = result.rows[0]?.value ?? {};
+  const skipNonOfficialMusicVideos =
+    typeof stored.skipNonOfficialMusicVideos === "boolean" ? stored.skipNonOfficialMusicVideos : false;
+  res.json({ skipNonOfficialMusicVideos });
+});
+
+router.put("/search", async (req, res) => {
+  const parsed = searchSettingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+  const existingResult = await pool.query("SELECT value FROM settings WHERE key = $1", [
+    "search"
+  ]);
+  const existing = existingResult.rows[0]?.value ?? {};
+  const skipNonOfficialMusicVideos =
+    typeof parsed.data.skipNonOfficialMusicVideos === "boolean"
+      ? parsed.data.skipNonOfficialMusicVideos
+      : typeof existing.skipNonOfficialMusicVideos === "boolean"
+        ? existing.skipNonOfficialMusicVideos
+        : false;
+  await pool.query(
+    "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()",
+    ["search", { skipNonOfficialMusicVideos }]
+  );
+  res.json({ skipNonOfficialMusicVideos });
 });
 
 router.get("/integrations", async (_req, res) => {

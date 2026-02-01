@@ -70,6 +70,134 @@ const buildSearchTarget = (query: string) => {
   return `ytsearch1:${preferOfficialVideoQuery(trimmed)}`;
 };
 
+const buildMetadataArgs = (query: string, options?: YtDlpOptions) => {
+  const args = ["--dump-json", "--no-playlist", "--no-warnings", "--skip-download"];
+  if (options?.cookiesPath) {
+    args.push("--cookies", options.cookiesPath);
+  } else if (options?.cookiesFromBrowser) {
+    args.push("--cookies-from-browser", options.cookiesFromBrowser);
+  } else if (options?.cookiesHeader) {
+    const trimmed = options.cookiesHeader.trim();
+    const headerValue = trimmed.toLowerCase().startsWith("cookie:")
+      ? trimmed.slice(trimmed.indexOf(":") + 1).trim()
+      : trimmed;
+    const singleLineValue = headerValue.split(/\r?\n/)[0]?.trim();
+    if (singleLineValue) {
+      args.push("--add-header", `Cookie: ${singleLineValue}`);
+    }
+  }
+  const searchTarget = buildSearchTarget(query);
+  if (searchTarget) {
+    args.push(searchTarget);
+  }
+  return args;
+};
+
+type YtDlpMetadata = {
+  title: string | null;
+  uploader: string | null;
+  channel: string | null;
+  uploaderId: string | null;
+};
+
+const parseMetadataFromDump = (output: string): YtDlpMetadata => {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      const title = entry?.title ? String(entry.title) : null;
+      const uploader = entry?.uploader ? String(entry.uploader) : null;
+      const channel = entry?.channel ? String(entry.channel) : null;
+      const uploaderId = entry?.uploader_id ? String(entry.uploader_id) : null;
+      if (title || uploader || channel || uploaderId) {
+        return { title, uploader, channel, uploaderId };
+      }
+    } catch {
+      // ignore malformed lines
+    }
+  }
+  return { title: null, uploader: null, channel: null, uploaderId: null };
+};
+
+const runYtDlpMetadata = async (args: string[]) => {
+  const runOnce = (command: string, commandArgs: string[]) =>
+    new Promise<string>((resolve, reject) => {
+      const child = spawn(command, commandArgs, { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", (error) => {
+        reject(error as NodeJS.ErrnoException);
+      });
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve(stdout);
+        } else {
+          reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+        }
+      });
+    });
+
+  try {
+    return await runOnce(resolveYtDlpPath(), args);
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== "ENOENT") {
+      throw error;
+    }
+    const python = process.env.YT_DLP_PYTHON?.trim() || "python3";
+    return runOnce(python, ["-m", "yt_dlp", ...args]);
+  }
+};
+
+export const resolveYtDlpMetadata = async (
+  query: string,
+  options?: YtDlpOptions
+): Promise<{ metadata: YtDlpMetadata | null; error: string | null }> => {
+  const envCookiesPath = process.env.YT_DLP_COOKIES?.trim() || null;
+  const envCookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim() || null;
+  const cookiesPath =
+    typeof options?.cookiesPath !== "undefined" ? options.cookiesPath : envCookiesPath;
+  const cookiesFromBrowser =
+    typeof options?.cookiesFromBrowser !== "undefined"
+      ? options.cookiesFromBrowser
+      : envCookiesFromBrowser;
+  const cookiesHeader =
+    typeof options?.cookiesHeader !== "undefined" ? options.cookiesHeader : null;
+  const effectiveOptions: YtDlpOptions = { cookiesPath, cookiesFromBrowser, cookiesHeader };
+
+  let lastError: string | null = null;
+  const preferredQuery = preferOfficialVideoQuery(query);
+  try {
+    const output = await runYtDlpMetadata(buildMetadataArgs(preferredQuery, effectiveOptions));
+    const metadata = parseMetadataFromDump(output);
+    if (metadata.title || metadata.uploader || metadata.channel || metadata.uploaderId) {
+      return { metadata, error: null };
+    }
+  } catch (error) {
+    lastError = error instanceof Error ? error.message : String(error);
+  }
+
+  if (preferredQuery !== query) {
+    try {
+      const output = await runYtDlpMetadata(buildMetadataArgs(query, effectiveOptions));
+      const metadata = parseMetadataFromDump(output);
+      if (metadata.title || metadata.uploader || metadata.channel || metadata.uploaderId) {
+        return { metadata, error: null };
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  return { metadata: null, error: lastError };
+};
+
 export const buildYtDlpArgs = (query: string, outputDir: string, quality?: string | null) => [
   "-f",
   qualityFormat(quality),

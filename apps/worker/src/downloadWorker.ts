@@ -1,15 +1,16 @@
-import { Worker } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import pool from "./db.js";
-import { runYtDlp } from "./ytDlp.js";
+import { resolveYtDlpMetadata, runYtDlp } from "./ytDlp.js";
 
 const connection = {
   host: process.env.REDIS_HOST,
   port: Number(process.env.REDIS_PORT ?? 6379)
 };
+const downloadQueue = new Queue("downloadQueue", { connection });
 
 const mediaRootCacheTtlMs = 30_000;
 let mediaRootCache: { value: string; loadedAt: number } | null = null;
@@ -163,14 +164,107 @@ const normalizeConcurrency = (value: unknown) => {
   return Math.min(rounded, 10);
 };
 
+type SearchSettings = {
+  skipNonOfficialMusicVideos: boolean;
+};
+
+const searchSettingsCacheTtlMs = 30_000;
+let searchSettingsCache: { value: SearchSettings; loadedAt: number } | null = null;
+
+const loadSearchSettings = async (): Promise<SearchSettings> => {
+  const now = Date.now();
+  if (searchSettingsCache && now - searchSettingsCache.loadedAt < searchSettingsCacheTtlMs) {
+    return searchSettingsCache.value;
+  }
+  try {
+    const result = await pool.query("SELECT value FROM settings WHERE key = $1", ["search"]);
+    const stored = result.rows[0]?.value ?? {};
+    const value = {
+      skipNonOfficialMusicVideos: stored.skipNonOfficialMusicVideos === true
+    };
+    searchSettingsCache = { value, loadedAt: now };
+    return value;
+  } catch (error) {
+    const fallback = { skipNonOfficialMusicVideos: false };
+    searchSettingsCache = { value: fallback, loadedAt: now };
+    return fallback;
+  }
+};
+
+const normalizeSource = (value: unknown) =>
+  typeof value === "string" && value.trim().length > 0 ? value.trim() : "manual";
+
+const shouldFilterByOfficialTitle = (source: string, settings: SearchSettings) =>
+  settings.skipNonOfficialMusicVideos && (source === "monitor" || source === "import");
+
+const looksLikeVevoChannel = (value: string | null | undefined) => {
+  if (!value) return false;
+  const tokens = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+  if (tokens.length === 0) return false;
+  return tokens.some((token) => token === "vevo" || token.endsWith("vevo"));
+};
+
+const isOfficialMusicVideoMatch = (params: {
+  title: string | null;
+  uploader: string | null;
+  channel: string | null;
+  uploaderId: string | null;
+}) => {
+  const title = params.title ?? "";
+  const normalizedTitle = title.toLowerCase();
+  const isUnofficial =
+    /\bunofficial\b/.test(normalizedTitle) || /\bnon[-\s]?official\b/.test(normalizedTitle);
+  const hasOfficialToken = /\bofficial\b/.test(normalizedTitle);
+  const hasVideoToken = /\bvideo\b/.test(normalizedTitle);
+  if (!isUnofficial && hasOfficialToken && hasVideoToken) {
+    return true;
+  }
+  const uploaderText = `${params.uploader ?? ""} ${params.channel ?? ""} ${params.uploaderId ?? ""}`;
+  return looksLikeVevoChannel(uploaderText);
+};
+
+const resolveOfficialCheck = async (
+  query: string,
+  youtubeSettings:
+    | {
+        cookiesPath?: string | null;
+        cookiesFromBrowser?: string | null;
+        cookiesHeader?: string | null;
+        outputFormat?: "original" | "mp4-remux" | "mp4-recode" | null;
+      }
+    | undefined
+) => {
+  const metadataResult = await resolveYtDlpMetadata(query, youtubeSettings);
+  const metadata = metadataResult.metadata;
+  const resolvedTitle = metadata?.title?.trim() || null;
+  const hasOfficialMatch = metadata
+    ? isOfficialMusicVideoMatch({
+        title: metadata.title,
+        uploader: metadata.uploader,
+        channel: metadata.channel,
+        uploaderId: metadata.uploaderId
+      })
+    : false;
+  if (hasOfficialMatch) {
+    return { ok: true, metadata, resolvedTitle, reason: null };
+  }
+  const reason = resolvedTitle
+    ? `Skipped: "${resolvedTitle}" does not look like an official video.`
+    : metadataResult.error
+      ? `Skipped: unable to resolve YouTube metadata (${metadataResult.error}).`
+      : "Skipped: unable to resolve YouTube metadata.";
+  return { ok: false, metadata, resolvedTitle, reason };
+};
+
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const resolveWorkerConcurrency = async () => {
-  const envValue = normalizeConcurrency(process.env.WORKER_CONCURRENCY);
-  if (envValue) {
-    return envValue;
-  }
-  const maxAttempts = 5;
+  const maxAttempts = 30;
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -183,8 +277,12 @@ const resolveWorkerConcurrency = async () => {
       break;
     } catch (error) {
       lastError = error;
-      await wait(500 * attempt);
+      await wait(1000);
     }
+  }
+  const envValue = normalizeConcurrency(process.env.WORKER_CONCURRENCY);
+  if (envValue) {
+    return envValue;
   }
   if (lastError) {
     console.warn("Failed to load download settings, using default concurrency.");
@@ -250,13 +348,125 @@ const downloadWorker = new Worker(
       return;
     }
 
-    const { downloadJobId, query, quality, artistName, albumTitle } = job.data as {
+    const { downloadJobId, query, quality, artistName, albumTitle, source, prechecked } = job.data as {
       downloadJobId: number;
       query: string;
       quality?: string | null;
       artistName?: string | null;
       albumTitle?: string | null;
+      source?: string | null;
+      prechecked?: boolean;
     };
+
+    const metaResult = await pool.query("SELECT status, source FROM download_jobs WHERE id = $1", [
+      downloadJobId
+    ]);
+    if (metaResult.rows.length === 0) {
+      return;
+    }
+    const currentStatus = metaResult.rows[0]?.status as string | null | undefined;
+    if (!currentStatus || currentStatus === "cancelled") {
+      return;
+    }
+    const resolvedSource = normalizeSource(metaResult.rows[0]?.source ?? source);
+
+    const settingsResult = await pool.query("SELECT value FROM settings WHERE key = $1", ["youtube"]);
+    const youtubeSettings = settingsResult.rows[0]?.value as
+      | {
+          cookiesPath?: string | null;
+          cookiesFromBrowser?: string | null;
+          cookiesHeader?: string | null;
+          outputFormat?: "original" | "mp4-remux" | "mp4-recode" | null;
+        }
+      | undefined;
+
+    const searchSettings = await loadSearchSettings();
+    if (job.name === "download-check") {
+      if (currentStatus !== "queued" && currentStatus !== "checking") {
+        return;
+      }
+      if (!shouldFilterByOfficialTitle(resolvedSource, searchSettings)) {
+        await downloadQueue.add("download", {
+          downloadJobId,
+          query,
+          source: resolvedSource,
+          quality,
+          artistName: artistName ?? null,
+          albumTitle: albumTitle ?? null,
+          prechecked: true
+        });
+        return;
+      }
+      await pool.query(
+        "UPDATE download_jobs SET progress_stage = $1, progress_detail = $2, progress_percent = NULL WHERE id = $3 AND status = 'queued'",
+        ["checking", "Checking metadata", downloadJobId]
+      );
+      const check = await resolveOfficialCheck(query, youtubeSettings);
+      if (!check.ok) {
+        await pool.query(
+          "UPDATE download_jobs SET status = $1, finished_at = NOW(), error = $2, progress_stage = $3, progress_detail = NULL WHERE id = $4 AND status <> 'cancelled'",
+          ["failed", check.reason, "failed", downloadJobId]
+        );
+        await pool.query(
+          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+          [
+            "download_skipped",
+            `Skipped download: ${query}`,
+            {
+              downloadJobId,
+              reason: check.reason,
+              source: resolvedSource,
+              title: check.resolvedTitle,
+              uploader: check.metadata?.uploader ?? null,
+              channel: check.metadata?.channel ?? null,
+              uploaderId: check.metadata?.uploaderId ?? null
+            }
+          ]
+        );
+        return;
+      }
+      await pool.query(
+        "UPDATE download_jobs SET progress_stage = $1, progress_detail = $2 WHERE id = $3 AND status = 'queued'",
+        ["queued", "Queued for download", downloadJobId]
+      );
+      await downloadQueue.add("download", {
+        downloadJobId,
+        query,
+        source: resolvedSource,
+        quality,
+        artistName: artistName ?? null,
+        albumTitle: albumTitle ?? null,
+        prechecked: true
+      });
+      return;
+    }
+
+    if (!prechecked && shouldFilterByOfficialTitle(resolvedSource, searchSettings)) {
+      const check = await resolveOfficialCheck(query, youtubeSettings);
+      if (!check.ok) {
+        await pool.query(
+          "UPDATE download_jobs SET status = $1, finished_at = NOW(), error = $2, progress_stage = $3, progress_detail = NULL WHERE id = $4 AND status <> 'cancelled'",
+          ["failed", check.reason, "failed", downloadJobId]
+        );
+        await pool.query(
+          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+          [
+            "download_skipped",
+            `Skipped download: ${query}`,
+            {
+              downloadJobId,
+              reason: check.reason,
+              source: resolvedSource,
+              title: check.resolvedTitle,
+              uploader: check.metadata?.uploader ?? null,
+              channel: check.metadata?.channel ?? null,
+              uploaderId: check.metadata?.uploaderId ?? null
+            }
+          ]
+        );
+        return;
+      }
+    }
 
     const startResult = await pool.query(
       "UPDATE download_jobs SET status = $1, started_at = NOW(), progress_percent = $2, progress_stage = $3, progress_detail = $4 WHERE id = $5 AND status <> 'cancelled' RETURNING id",
@@ -270,18 +480,6 @@ const downloadWorker = new Worker(
       "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
       ["download_started", `Downloading: ${query}`, { downloadJobId }]
     );
-
-    const settingsResult = await pool.query("SELECT value FROM settings WHERE key = $1", [
-      "youtube"
-    ]);
-    const youtubeSettings = settingsResult.rows[0]?.value as
-      | {
-          cookiesPath?: string | null;
-          cookiesFromBrowser?: string | null;
-          cookiesHeader?: string | null;
-          outputFormat?: "original" | "mp4-remux" | "mp4-recode" | null;
-        }
-      | undefined;
 
     const outputDir = await buildOutputDir(artistName, albumTitle);
     const downloadStartedAt = Date.now();

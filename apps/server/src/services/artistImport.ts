@@ -923,7 +923,7 @@ const queueImportDownloads = async (downloads: ImportDownload[]) => {
 
       if (inserted.length > 0) {
         const queueItems = chunk.slice(0, inserted.length).map((download, index) => ({
-          name: "download",
+          name: "download-check",
           data: {
             downloadJobId: inserted[index]?.id,
             query: download.query,

@@ -43,6 +43,10 @@ const updateStreamItemsSchema = z.object({
   genreIds: z.array(z.number().int()).optional()
 });
 
+const rescanStreamSchema = z.object({
+  artistIds: z.array(z.number().int()).optional()
+});
+
 const streamActionSchema = z.object({
   action: z.enum(["start", "stop", "reboot"])
 });
@@ -1472,6 +1476,19 @@ const loadStream = async (streamId: number) => {
     | undefined;
 };
 
+const loadStreamArtistIds = async (streamId: number) => {
+  const result = await pool.query(
+    `SELECT DISTINCT al.artist_id AS id
+     FROM stream_items si
+     JOIN tracks t ON t.id = si.track_id
+     JOIN albums al ON al.id = t.album_id
+     WHERE si.stream_id = $1
+       AND al.artist_id IS NOT NULL`,
+    [streamId]
+  );
+  return result.rows.map((row: { id: number }) => row.id);
+};
+
 const loadStreamItems = async (streamId: number) => {
   const result = await pool.query(
     `SELECT si.id AS item_id,
@@ -1520,7 +1537,9 @@ const buildStreamResponse = async (stream: {
 }) => {
   const onlineSince = stream.restarted_at ?? stream.updated_at ?? stream.created_at;
   const onlineSeconds =
-    stream.status === "active" ? getFfmpegUptimeSeconds(stream.id) : null;
+    stream.status === "active"
+      ? getFfmpegUptimeSeconds(stream.id) ?? getStreamElapsedSeconds(stream)
+      : null;
   const seedBase = onlineSince ? new Date(onlineSince).getTime() : Date.now();
   const seededRandom = createSeededRandom(Math.floor(seedBase / 1000));
 
@@ -1718,7 +1737,7 @@ router.post("/", async (req, res) => {
   }
 
   const insertResult = await pool.query(
-    "INSERT INTO streams (name, icon, status, shuffle, encoding, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) RETURNING id, name, icon, created_at, updated_at, status, shuffle, encoding, restarted_at",
+    "INSERT INTO streams (name, icon, status, shuffle, encoding, created_at, updated_at, restarted_at) VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), NOW()) RETURNING id, name, icon, created_at, updated_at, status, shuffle, encoding, restarted_at",
     [name, icon, "active", shuffle, encoding]
   );
   const stream = insertResult.rows[0] as {
@@ -1938,6 +1957,79 @@ router.post("/:id/actions", async (req, res) => {
       );
       await ensureHlsSession(stream, availableItems);
     }
+  }
+  const payload = await buildStreamResponse(stream);
+  res.json(payload);
+});
+
+router.post("/:id/rescan", async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid stream id" });
+  }
+  const parsed = rescanStreamSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+  const existing = await loadStream(id);
+  if (!existing) {
+    return res.status(404).json({ error: "Stream not found" });
+  }
+  const requestedArtistIds = parsed.data.artistIds ?? [];
+  const artistIds =
+    requestedArtistIds.length > 0
+      ? Array.from(new Set(requestedArtistIds))
+      : await loadStreamArtistIds(id);
+  if (artistIds.length === 0) {
+    return res.status(400).json({ error: "No artists available for rescan" });
+  }
+  const trackIds = await resolveTrackIds({ artistIds });
+  if (trackIds.length === 0) {
+    return res.status(400).json({ error: "No tracks found for rescan" });
+  }
+
+  await stopHlsSession(id, undefined, "rescan");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const exists = await client.query("SELECT id FROM streams WHERE id = $1", [id]);
+    if (exists.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Stream not found" });
+    }
+    await client.query("DELETE FROM stream_items WHERE stream_id = $1", [id]);
+    await insertStreamItems(id, trackIds, client);
+    await client.query(
+      "UPDATE streams SET status = $1, updated_at = NOW(), restarted_at = NOW() WHERE id = $2",
+      ["active", id]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const stream = await loadStream(id);
+  if (!stream) {
+    return res.status(404).json({ error: "Stream not found" });
+  }
+  const items = await loadStreamItems(id);
+  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
+    file_path: string;
+    artist_name: string | null;
+    track_id: number;
+  }>;
+  if (availableItems.length > 0) {
+    await Promise.all(
+      availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id))
+    );
+    await Promise.all(
+      availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path))
+    );
+    await ensureHlsSession(stream, availableItems);
   }
   const payload = await buildStreamResponse(stream);
   res.json(payload);
