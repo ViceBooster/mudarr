@@ -135,7 +135,13 @@ const formatBandwidth = (bytesPerSecond: number | null | undefined) => {
     typeof bytesPerSecond === "number" && Number.isFinite(bytesPerSecond) && bytesPerSecond > 0
       ? bytesPerSecond
       : 0;
-  return `${formatBytes(Math.round(value))}/s`;
+  const bitsPerSecond = value * 8;
+  if (bitsPerSecond <= 0) return "0 bps";
+  const units = ["bps", "kbps", "Mbps", "Gbps", "Tbps"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bitsPerSecond) / Math.log(1000)));
+  const display = bitsPerSecond / Math.pow(1000, index);
+  const rounded = display.toFixed(display >= 10 || index === 0 ? 0 : 1);
+  return `${rounded} ${units[index]}`;
 };
 
 const downsampleSeries = (values: number[], targetPoints: number) => {
