@@ -49,7 +49,7 @@ Any Docker environment works. For Ubuntu 20.04:
 
 ## Configuration
 
-Create a `.env` file in the repo root (required):
+Create a `.env` file alongside your `docker-compose.yml` (repo root if you cloned it):
 
 ```bash
 POSTGRES_DB=mudarr
