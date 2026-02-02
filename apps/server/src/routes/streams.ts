@@ -1011,9 +1011,10 @@ const stopHlsSession = async (
   }
 };
 
-const hlsIdleTimeoutMsRaw = Number(process.env.HLS_IDLE_TIMEOUT_MS ?? 120_000);
+const hlsIdleTimeoutMsRaw = Number(process.env.HLS_IDLE_TIMEOUT_MS ?? 15 * 60_000);
 const hlsIdleTimeoutMs =
-  Number.isFinite(hlsIdleTimeoutMsRaw) && hlsIdleTimeoutMsRaw > 0 ? hlsIdleTimeoutMsRaw : 120_000;
+  Number.isFinite(hlsIdleTimeoutMsRaw) ? Math.floor(hlsIdleTimeoutMsRaw) : 15 * 60_000;
+const hlsIdleSweepEnabled = hlsIdleTimeoutMs > 0;
 const hlsSweepIntervalMsRaw = Number(process.env.HLS_SWEEP_INTERVAL_MS ?? 15_000);
 const hlsSweepIntervalMs =
   Number.isFinite(hlsSweepIntervalMsRaw) && hlsSweepIntervalMsRaw > 0
@@ -1022,15 +1023,17 @@ const hlsSweepIntervalMs =
 
 // Prevent orphaned/idle stream generators from running forever.
 // Any request to the HLS session playlist/segments refreshes `lastAccess`.
-setInterval(() => {
-  const now = Date.now();
-  for (const [streamId, session] of hlsSessions.entries()) {
-    if (session.stopped) continue;
-    if (now - session.lastAccess > hlsIdleTimeoutMs) {
-      void stopHlsSession(streamId, session, "idle-timeout");
+if (hlsIdleSweepEnabled) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [streamId, session] of hlsSessions.entries()) {
+      if (session.stopped) continue;
+      if (now - session.lastAccess > hlsIdleTimeoutMs) {
+        void stopHlsSession(streamId, session, "idle-timeout");
+      }
     }
-  }
-}, hlsSweepIntervalMs).unref?.();
+  }, hlsSweepIntervalMs).unref?.();
+}
 
 const findNextSegmentIndex = async (dir: string, fallback: number) => {
   try {
@@ -1132,7 +1135,7 @@ const runHlsConcatenated = async (
   items: Array<{ file_path: string }>,
   encoding: typeof encodingOptions[number],
   startOffsetSeconds = 0
-) => {
+) : Promise<{ code: number | null; signal: NodeJS.Signals | null }> => {
   const listPath = path.join(session.dir, "stream.ffconcat");
   const concatBody = buildConcatBody(items);
   await fsPromises.writeFile(listPath, concatBody);
@@ -1288,7 +1291,7 @@ const runHlsConcatenated = async (
     );
   }
 
-  return new Promise<void>((resolve) => {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     console.log(
       `Stream ${session.dir}: Starting HLS ffmpeg (${actualEncoding}) with offset ${startOffsetSeconds.toFixed(
         3
@@ -1310,7 +1313,7 @@ const runHlsConcatenated = async (
       if (typeof ffmpeg.pid === "number") {
         void clearStreamPidInfo(session.streamId, ffmpeg.pid);
       }
-      resolve();
+      resolve({ code: null, signal: null });
     };
     if (ffmpeg.stderr) {
     ffmpeg.stderr.on("data", (chunk) => {
@@ -1327,7 +1330,14 @@ const runHlsConcatenated = async (
       } else {
         console.log(`Stream ${session.dir}: FFmpeg completed successfully`);
       }
-      finalize();
+      if (resolved) return;
+      resolved = true;
+      session.currentProcess = null;
+      session.processStartedAt = null;
+      if (typeof ffmpeg.pid === "number") {
+        void clearStreamPidInfo(session.streamId, ffmpeg.pid);
+      }
+      resolve({ code: code ?? null, signal: (signal as NodeJS.Signals | null) ?? null });
     });
   });
 };
@@ -1339,22 +1349,51 @@ const runHlsGenerator = async (
 ) => {
   console.log(`Stream ${streamId}: HLS generator starting (loop will run until stopped)`);
   let loopCount = 0;
+  let failureStreak = 0;
   while (!session.stopped) {
     loopCount++;
     console.log(`Stream ${streamId}: HLS generator loop #${loopCount}`);
     
     session.segmentIndex = await findNextSegmentIndex(session.dir, session.segmentIndex);
-    await runHlsConcatenated(
+    const startedAt = Date.now();
+    const result = await runHlsConcatenated(
       session,
       session.ordered.map((item) => ({ file_path: item.file_path })),
       encoding,
       0
     );
+    const ranForMs = Date.now() - startedAt;
     
     // If the session was stopped during ffmpeg run, exit immediately
     if (session.stopped) {
       break;
     }
+
+    // If FFmpeg exits immediately without producing output, it's usually due to a bad first file
+    // (unreadable/corrupt/unrecognized). Rotate the playlist to try a different first item and
+    // avoid log/CPU thrashing.
+    const quickFailure = (result.code && result.code !== 0 && ranForMs < 2000) || (result.code === null && ranForMs < 2000);
+    if (quickFailure) {
+      failureStreak += 1;
+      const first = session.ordered.shift();
+      if (first) {
+        session.ordered.push(first);
+      }
+      const backoffMs = Math.min(10_000, 500 * failureStreak);
+      console.warn(
+        `Stream ${streamId}: FFmpeg failed quickly (code=${result.code ?? "unknown"}, ran=${ranForMs}ms). ` +
+          `Rotating first item and retrying in ${backoffMs}ms (streak=${failureStreak}).`
+      );
+      if (failureStreak >= 10) {
+        console.error(`Stream ${streamId}: too many consecutive FFmpeg failures; stopping session.`);
+        await stopHlsSession(streamId, session, "ffmpeg-failed");
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      continue;
+    }
+
+    failureStreak = 0;
     
     // Brief pause before restarting the playlist
     await new Promise((resolve) => setTimeout(resolve, 500));

@@ -213,6 +213,7 @@ type YtDlpOptions = {
   cookiesFromBrowser?: string | null;
   cookiesHeader?: string | null;
   outputFormat?: YtDlpOutputFormat | null;
+  outputTemplate?: string | null;
 };
 
 const normalizeOutputFormat = (raw?: string | null) => {
@@ -301,6 +302,14 @@ const buildArgsWithOptions = (
   quality?: string | null,
   options?: YtDlpOptions
 ) => {
+  const rawTemplate = options?.outputTemplate;
+  const outputTemplate =
+    typeof rawTemplate === "string" && rawTemplate.trim().length > 0
+      ? rawTemplate.trim()
+      : "%(title)s.%(ext)s";
+  // Prevent path traversal / nested directories via template.
+  const safeTemplate = outputTemplate.replace(/[\\/]+/g, "_");
+
   const args = [
     "--progress",
     "--newline",
@@ -313,7 +322,7 @@ const buildArgsWithOptions = (
     "-f",
     qualityFormat(quality),
     "-o",
-    path.join(outputDir, "%(title)s.%(ext)s"),
+    path.join(outputDir, safeTemplate),
     // Download optimizations
     "--concurrent-fragments", "5",  // Download multiple fragments in parallel
     "--buffer-size", "16K",          // Increase buffer size for faster downloads

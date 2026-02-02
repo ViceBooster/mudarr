@@ -60,6 +60,67 @@ const resolveMediaRoot = async () => {
 const sanitizeSegment = (value: string) =>
   value.replace(/[<>:"/\\\\|?*]+/g, "").replace(/\s+/g, " ").trim();
 
+const sanitizeFilename = (value: string) => {
+  // Cross-platform filename sanitization (Linux + Windows-friendly).
+  // Keep it conservative: remove reserved characters, control chars, and normalize whitespace.
+  const cleaned = value
+    .normalize("NFKC")
+    .replace(/[\x00-\x1f\x7f]+/g, " ")
+    .replace(/[<>:"/\\\\|?*\u0000]+/g, " ")
+    .replace(/['"]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "");
+  const truncated = cleaned.length > 180 ? cleaned.slice(0, 180).trim() : cleaned;
+  const base = truncated || "Track";
+
+  // Windows reserved device names (also problematic on Samba mounts).
+  const lower = base.toLowerCase();
+  const reserved = new Set([
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9"
+  ]);
+  return reserved.has(lower) ? `${base}_` : base;
+};
+
+const chooseOutputBaseName = (params: { trackId?: number | null; title?: string | null; fallback?: string }) => {
+  const base = sanitizeFilename(params.title ?? params.fallback ?? "Track");
+  // Prefer a clean name, but ensure uniqueness within an album folder.
+  if (!params.trackId) return base;
+  return base;
+};
+
+const ensureUniqueMp4Base = (outputDir: string, base: string, trackId?: number | null) => {
+  const candidate = path.join(outputDir, `${base}.mp4`);
+  if (!fs.existsSync(candidate)) return base;
+  if (trackId) {
+    const withId = `${base}-${trackId}`;
+    if (!fs.existsSync(path.join(outputDir, `${withId}.mp4`))) return withId;
+  }
+  // Last resort: add timestamp.
+  return `${base}-${Date.now()}`;
+};
+
 const buildOutputDir = async (artistName?: string | null, albumTitle?: string | null) => {
   const mediaRoot = await resolveMediaRoot();
   const artist = sanitizeSegment(artistName ?? "Unknown Artist") || "Unknown Artist";
@@ -481,7 +542,22 @@ const downloadWorker = new Worker(
       ["download_started", `Downloading: ${query}`, { downloadJobId }]
     );
 
+    const jobMeta = await pool.query("SELECT track_id FROM download_jobs WHERE id = $1", [
+      downloadJobId
+    ]);
+    const trackId = jobMeta.rows[0]?.track_id as number | null | undefined;
+    const trackMeta = trackId
+      ? await pool.query(
+          "SELECT t.title, a.artist_id FROM tracks t LEFT JOIN albums a ON a.id = t.album_id WHERE t.id = $1",
+          [trackId]
+        )
+      : { rows: [] as Array<{ title?: string; artist_id?: number | null }> };
+    const trackTitle = (trackMeta.rows[0]?.title as string | undefined) ?? null;
+    const artistId = (trackMeta.rows[0]?.artist_id as number | null | undefined) ?? null;
+
     const outputDir = await buildOutputDir(artistName, albumTitle);
+    const desiredBase = chooseOutputBaseName({ trackId, title: trackTitle, fallback: query });
+    const outputBase = ensureUniqueMp4Base(outputDir, desiredBase, trackId);
     const downloadStartedAt = Date.now();
     let lastDownloadProgress = -1;
     let lastProcessingProgress = -1;
@@ -547,7 +623,7 @@ const downloadWorker = new Worker(
           )
           .catch(() => undefined);
       },
-      youtubeSettings,
+      { ...youtubeSettings, outputTemplate: `${outputBase}.%(ext)s` },
       (stage, detail) => {
         void updateStage(stage, detail).catch(() => undefined);
       }
@@ -562,18 +638,8 @@ const downloadWorker = new Worker(
       return;
     }
     if (resolvedFilePath) {
-      const jobMeta = await pool.query(
-        "SELECT track_id FROM download_jobs WHERE id = $1",
-        [downloadJobId]
-      );
-      const trackId = jobMeta.rows[0]?.track_id as number | null | undefined;
       if (trackId) {
-        const trackMeta = await pool.query(
-          "SELECT t.title, a.artist_id FROM tracks t LEFT JOIN albums a ON a.id = t.album_id WHERE t.id = $1",
-          [trackId]
-        );
-        const title = trackMeta.rows[0]?.title ?? path.basename(resolvedFilePath);
-        const artistId = trackMeta.rows[0]?.artist_id ?? null;
+        const title = trackTitle ?? path.basename(resolvedFilePath);
         const existingVideo = await pool.query("SELECT id FROM videos WHERE track_id = $1", [
           trackId
         ]);
