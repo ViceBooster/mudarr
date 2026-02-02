@@ -1,6 +1,28 @@
 const authStorageKey = "mudarr-auth";
 
-export const apiBaseUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+type RuntimeConfig = {
+  apiBaseUrl?: string | null;
+};
+
+const getRuntimeConfig = (): RuntimeConfig => {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  return (window as typeof window & { __MUDARR_CONFIG__?: RuntimeConfig }).__MUDARR_CONFIG__ ?? {};
+};
+
+const normalizeBaseUrl = (value?: string | null) => {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+};
+
+const runtimeApiBaseUrl = normalizeBaseUrl(getRuntimeConfig().apiBaseUrl);
+
+export const apiBaseUrl =
+  runtimeApiBaseUrl ??
+  normalizeBaseUrl(import.meta.env.VITE_API_URL ?? null) ??
+  "http://localhost:3001";
 
 export const getAuthToken = () => {
   try {

@@ -7607,7 +7607,7 @@ export default function App() {
                           this server.
                         </p>
                         <p className="mt-2 text-xs text-slate-500">
-                          API base: {import.meta.env.VITE_API_URL ?? "http://localhost:3001"}
+                          API base: {apiBaseUrl}
                         </p>
                       </div>
                       <button

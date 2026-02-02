@@ -84,15 +84,15 @@ YT_DLP_COOKIES_FROM_BROWSER=
 ### Web API base URL
 
 The web UI defaults to `http://localhost:3001`. If you change `API_PORT`, set `VITE_API_URL`
-to the same host/port and rebuild the web image.
+to the same host/port. The web container reads `VITE_API_URL` at startup (no rebuild required).
 
 1. Create `apps/web/.env` (for local builds):
    ```bash
    VITE_API_URL=http://localhost:3001
    ```
-2. Rebuild the web image:
+2. Restart the web container:
    ```bash
-   docker compose build web
+   docker compose up -d web
    ```
 
 ## Storage volumes
@@ -181,6 +181,23 @@ docker compose pull
 docker compose up -d
 ```
 
+## How to update
+
+Run these commands from the folder that contains your `docker-compose.yml` (or pass `-f /path/to/docker-compose.yml`).
+
+1. Pull the latest images:
+   ```bash
+   docker compose pull
+   ```
+2. Restart containers:
+   ```bash
+   docker compose up -d
+   ```
+3. Optional cleanup:
+   ```bash
+   docker image prune -f
+   ```
+
 ## Reverse proxy (single domain)
 
 For a single domain, proxy `/api` to the server and everything else to the web UI.
@@ -246,7 +263,7 @@ cloudflared tunnel route dns mudarr api.mudarr.example.com
 cloudflared tunnel run mudarr
 ```
 
-Set `VITE_API_URL=https://api.mudarr.example.com` before rebuilding the web image, and set the public base URL in Settings to `https://api.mudarr.example.com` so streams resolve correctly.
+Set `VITE_API_URL=https://api.mudarr.example.com`, and set the public base URL in Settings to `https://api.mudarr.example.com` so streams resolve correctly.
 
 ## Integrations
 
