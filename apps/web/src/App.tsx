@@ -124,6 +124,13 @@ const toSentenceCase = (value: string) => {
   return normalized[0].toUpperCase() + normalized.slice(1);
 };
 
+const formatVersionLabel = (value: string | null | undefined) => {
+  if (!value) return "Version unknown";
+  const trimmed = value.trim();
+  if (!trimmed) return "Version unknown";
+  return trimmed.startsWith("v") || trimmed.startsWith("V") ? trimmed : `v${trimmed}`;
+};
+
 const formatBytes = (bytes: number) => {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -1279,6 +1286,7 @@ export default function App() {
   const streamHlsRef = useRef<any>(null);
   const previousImportJobIds = useRef<Set<number>>(new Set());
   const recentImportJobIds = useRef<Set<number>>(new Set());
+  const updateCheckTriggered = useRef(false);
 
   const setupComplete = setupStatus === "complete";
   const canUseApi = setupComplete && authStatus === "authenticated";
@@ -2475,6 +2483,12 @@ export default function App() {
     if (updateStatus) return;
     void checkForUpdates(false);
   }, [canUseApi, activeTab, activeSettingsTab, updateStatus]);
+
+  useEffect(() => {
+    if (!canUseApi || updateCheckTriggered.current) return;
+    updateCheckTriggered.current = true;
+    void checkForUpdates(false);
+  }, [canUseApi]);
 
   useEffect(() => {
     if (!canUseApi) return;
@@ -4770,7 +4784,7 @@ export default function App() {
 
         <main className="flex-1">
           <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
-            <div className="flex flex-col gap-4 px-6 py-4 md:flex-row md:items-center">
+            <div className="flex flex-col gap-4 px-6 py-4 md:flex-row md:items-center md:justify-between">
               <div className="relative z-40 w-full md:max-w-lg">
                 <input
                   value={searchTerm}
@@ -4887,6 +4901,19 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-600">
+                  {formatVersionLabel(updateStatus?.currentVersion)}
+                </span>
+                {updateStatus?.updateAvailable && (
+                  <button
+                    onClick={() => changeSettingsTab("updates")}
+                    className="rounded-full bg-amber-100 px-2 py-1 font-semibold text-amber-700 hover:bg-amber-200"
+                  >
+                    Update available
+                  </button>
                 )}
               </div>
             </div>

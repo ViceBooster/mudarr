@@ -128,6 +128,41 @@ To view logs:
 docker compose logs -f server worker
 ```
 
+## Step-by-step Docker setup
+
+1. Use the provided `docker-compose.yml` (clone the repo) or create your own compose file
+   that references the GHCR images.
+   ```bash
+   git clone https://github.com/vicebooster/mudarr.git
+   cd mudarr
+   ```
+2. Create your `.env` file:
+   ```bash
+   cp .env.example .env
+   ```
+3. Create required host folders:
+   ```bash
+   mkdir -p ./media ./storage
+   ```
+4. (Optional) Customize storage paths in `docker-compose.yml`:
+   ```yaml
+       volumes:
+         - /mnt/media/videos:/data/media
+         - /mnt/media/storage:/data/storage
+   ```
+5. Start the stack:
+   ```bash
+   docker compose up -d
+   ```
+6. Open `http://localhost:3000` and finish setup:
+   - Create the admin user.
+   - Set media storage destination to `/data/media` (or your custom path).
+   - If streaming externally, set the public base URL in Settings.
+
+Notes:
+- `./media` maps to `/data/media` inside the containers (downloads).
+- `./storage` maps to `/data/storage` (scratch space, cookies, HLS temp).
+
 ## Deploy with GHCR images
 
 Available images:
