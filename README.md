@@ -143,6 +143,8 @@ docker compose pull
 docker compose up -d
 ```
 
+Maintainers: see `README-devs.md` for release and CI notes.
+
 
 ## Reverse proxy (single domain)
 
