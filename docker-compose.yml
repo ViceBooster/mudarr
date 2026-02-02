@@ -13,7 +13,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${HOST_REDIS_PORT:-6379}:6379"
 
   server:
     image: ghcr.io/${GHCR_OWNER:-vicebooster}/${GHCR_REPO:-mudarr}/server:latest
