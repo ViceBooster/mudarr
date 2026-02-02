@@ -8181,7 +8181,7 @@ export default function App() {
             <div
               ref={playerRef}
               style={playerPosition ? { left: playerPosition.x, top: playerPosition.y } : undefined}
-              className={`fixed z-10 overflow-auto max-w-[90vw] max-h-[90vh] ${
+              className={`fixed z-40 overflow-auto max-w-[90vw] max-h-[90vh] ${
                 playerMode === "compact"
                   ? "w-[220px] h-[180px] min-w-[200px] min-h-[160px] resize-none"
                   : "w-[520px] h-[260px] min-w-[320px] min-h-[200px] resize"
