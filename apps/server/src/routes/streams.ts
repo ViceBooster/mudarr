@@ -1144,11 +1144,13 @@ const runHlsConcatenated = async (
   if (encoding === "original" || encoding === "copy") {
     actualEncoding = "copy";
   }
+
+  const hlsFfmpegLogLevel = (process.env.HLS_FFMPEG_LOGLEVEL ?? "error").trim() || "error";
   
   const args = [
     "-hide_banner",
     "-loglevel",
-    "error",
+    hlsFfmpegLogLevel,
     "-f",
     "concat",
     "-safe",
@@ -1158,7 +1160,8 @@ const runHlsConcatenated = async (
     "-err_detect",
     "ignore_err",
     "-protocol_whitelist",
-    "file,pipe,crypto,data"
+    // Some FFmpeg builds use nested protocols when reading media; include common ones.
+    "file,pipe,crypto,data,subfile,concat"
   ];
   
   // For copy mode with seeking, put -ss BEFORE -i for better compatibility
@@ -1219,6 +1222,10 @@ const runHlsConcatenated = async (
       "160k"
     );
   }
+
+  // Be explicit about mapping. This avoids edge cases where FFmpeg selects no streams.
+  args.push("-map", "0:v?", "-map", "0:a?");
+
   if (actualEncoding !== "copy") {
     // Align segment boundaries to forced keyframes for stable HLS playback.
     args.push("-force_key_frames", hlsForceKeyFrameExpr, "-sc_threshold", "0");
