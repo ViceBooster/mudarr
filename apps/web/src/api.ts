@@ -22,7 +22,7 @@ const runtimeApiBaseUrl = normalizeBaseUrl(getRuntimeConfig().apiBaseUrl);
 export const apiBaseUrl =
   runtimeApiBaseUrl ??
   normalizeBaseUrl(import.meta.env.VITE_API_URL ?? null) ??
-  "http://localhost:3001";
+  "http://localhost:3002";
 
 export const getAuthToken = () => {
   try {

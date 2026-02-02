@@ -62,7 +62,7 @@ API_PORT=3001
 WEB_PORT=3000
 REDIS_PORT=6379
 POSTGRES_PORT=5432
-VITE_API_URL=http://localhost:3001
+VITE_API_URL=http://localhost:3002
 
 # Optional: move HLS temp files onto the storage volume
 HLS_TMP_DIR=/data/storage/hls
@@ -83,12 +83,12 @@ YT_DLP_COOKIES_FROM_BROWSER=
 
 ### Web API base URL
 
-The web UI defaults to `http://localhost:3001`. If you change `API_PORT`, set `VITE_API_URL`
+The web UI defaults to `http://localhost:3002`. If you change `API_PORT`, set `VITE_API_URL`
 to the same host/port. The web container reads `VITE_API_URL` at startup (no rebuild required).
 
 1. Create `apps/web/.env` (for local builds):
    ```bash
-   VITE_API_URL=http://localhost:3001
+   VITE_API_URL=http://localhost:3002
    ```
 2. Restart the web container:
    ```bash
@@ -238,7 +238,7 @@ If you use a single domain, set `VITE_API_URL=https://mudarr.example.com` and se
 For Cloudflare Tunnel, the simplest setup is two hostnames:
 
 - `mudarr.example.com` -> web (`http://localhost:3000`)
-- `api.mudarr.example.com` -> server (`http://localhost:3001`)
+- `api.mudarr.example.com` -> server (`http://localhost:3002`)
 
 Example `~/.cloudflared/config.yml`:
 
@@ -250,7 +250,7 @@ ingress:
   - hostname: mudarr.example.com
     service: http://localhost:3000
   - hostname: api.mudarr.example.com
-    service: http://localhost:3001
+    service: http://localhost:3002
   - service: http_status:404
 ```
 
