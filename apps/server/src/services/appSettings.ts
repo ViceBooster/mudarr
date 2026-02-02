@@ -96,6 +96,21 @@ export const getBaseUrl = async (req: {
   if (publicApiBaseUrl) return publicApiBaseUrl;
   const domain = normalizeDomain(settings.domain);
   if (domain) return domain;
+
+  // When running behind a reverse proxy, req.protocol may be "http" unless the
+  // server trusts the proxy. As a fallback (opt-in), honor forwarded headers.
+  const trustProxyRaw = (process.env.TRUST_PROXY ?? "").trim().toLowerCase();
+  const trustProxy = trustProxyRaw === "1" || trustProxyRaw === "true" || trustProxyRaw === "yes";
+  if (trustProxy) {
+    const forwardedProto = req.get("x-forwarded-proto");
+    const forwardedHost = req.get("x-forwarded-host");
+    const proto = forwardedProto ? forwardedProto.split(",")[0]?.trim() : "";
+    const host = forwardedHost ? forwardedHost.split(",")[0]?.trim() : "";
+    if (proto && host) {
+      return `${proto}://${host}`;
+    }
+  }
+
   const host = req.get("host") ?? "localhost:3002";
   return `${req.protocol}://${host}`;
 };

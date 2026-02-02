@@ -242,8 +242,10 @@ const buildCachedHlsPlaylist = async (
     return { playlist: null, missing: [], isComplete: false };
   }
   const tokenParam = encodeURIComponent(token);
-  const segmentUrl = (trackId: number, segment: string) =>
-    `${baseUrl}/api/tracks/${trackId}/hls/${encodeURIComponent(segment)}?token=${tokenParam}`;
+  const segmentUrl = (trackId: number, segment: string, cacheBuster?: string) => {
+    const url = `${baseUrl}/api/tracks/${trackId}/hls/${encodeURIComponent(segment)}?token=${tokenParam}`;
+    return cacheBuster ? `${url}&v=${encodeURIComponent(cacheBuster)}` : url;
+  };
   type SegmentEntry = {
     duration: number;
     uri: string;
@@ -261,14 +263,14 @@ const buildCachedHlsPlaylist = async (
       continue;
     }
     maxTargetDuration = Math.max(maxTargetDuration, parsed.targetDuration);
-    const mapLine = parsed.mapLine
-      ? parsed.mapLine.replace(/URI="[^"]*"/, `URI="${segmentUrl(item.track_id, "init.mp4")}"`)
-      : null;
+    // Keep the original map line as a template; we rewrite the URI when rendering
+    // so we can include stable cache-busting params for strict HLS clients.
+    const mapLine = parsed.mapLine ?? null;
     for (const segment of parsed.segments) {
       totalDurationSeconds += segment.duration;
       segments.push({
         duration: segment.duration,
-        uri: segmentUrl(item.track_id, segment.uri),
+        uri: segment.uri,
         trackId: item.track_id,
         mapLine
       });
@@ -280,9 +282,12 @@ const buildCachedHlsPlaylist = async (
   const isLive = typeof elapsedSeconds === "number";
   let windowStartIndex = 0;
   let windowEndIndex = segments.length;
+  let loopIndex = 0;
+  let endOffsetSeconds = 0;
   if (totalDurationSeconds > 0 && isLive) {
-    const endOffset = Math.max(0, elapsedSeconds % totalDurationSeconds);
-    const windowStartOffset = Math.max(0, endOffset - hlsRestreamWindowSeconds);
+    loopIndex = Math.floor(elapsedSeconds / totalDurationSeconds);
+    endOffsetSeconds = Math.max(0, elapsedSeconds % totalDurationSeconds);
+    const windowStartOffset = Math.max(0, endOffsetSeconds - hlsRestreamWindowSeconds);
     let cursor = 0;
     for (let i = 0; i < segments.length; i += 1) {
       const next = cursor + segments[i].duration;
@@ -295,7 +300,7 @@ const buildCachedHlsPlaylist = async (
     cursor = 0;
     for (let i = 0; i < segments.length; i += 1) {
       const next = cursor + segments[i].duration;
-      if (endOffset <= next) {
+      if (endOffsetSeconds <= next) {
         windowEndIndex = i + 1;
         break;
       }
@@ -309,6 +314,23 @@ const buildCachedHlsPlaylist = async (
   let lastTrackId: number | null = null;
   let discontinuitySequence = 0;
   let preStartLastTrackId: number | null = null;
+
+  // For "live looping" we must keep MEDIA-SEQUENCE monotonic; otherwise many
+  // third-party HLS ingest clients will drop when the sequence jumps backward.
+  // We compute a virtual global sequence based on completed loops.
+  const mediaSequence = isLive ? loopIndex * segments.length + windowStartIndex : windowStartIndex;
+
+  // Discontinuity sequence should also be monotonic when looping.
+  // Count discontinuities in a full loop (track changes between consecutive segments).
+  let fullLoopDiscontinuities = 0;
+  for (let i = 1; i < segments.length; i += 1) {
+    if (segments[i].trackId !== segments[i - 1].trackId) {
+      fullLoopDiscontinuities += 1;
+    }
+  }
+  // Add one discontinuity per loop for the wrap-around from end -> start.
+  const baseLoopDiscontinuities = isLive && loopIndex > 0 ? loopIndex * (fullLoopDiscontinuities + 1) : 0;
+
   for (let i = 0; i < windowStartIndex; i += 1) {
     const trackId = segments[i]?.trackId ?? null;
     if (trackId === null) continue;
@@ -317,6 +339,14 @@ const buildCachedHlsPlaylist = async (
     }
     preStartLastTrackId = trackId;
   }
+  discontinuitySequence += baseLoopDiscontinuities;
+
+  // If we are right after a wrap-around, explicitly mark a discontinuity once
+  // so strict HLS clients don't assume continuity across loops.
+  if (isLive && loopIndex > 0 && windowStartIndex === 0 && endOffsetSeconds < hlsPlaylistWindowSeconds) {
+    bodyLines.push("#EXT-X-DISCONTINUITY");
+  }
+
   for (let i = windowStartIndex; i < windowEndIndex; i += 1) {
     const segment = segments[i];
     if (lastTrackId !== segment.trackId) {
@@ -324,19 +354,26 @@ const buildCachedHlsPlaylist = async (
         bodyLines.push("#EXT-X-DISCONTINUITY");
       }
       if (segment.mapLine) {
-        bodyLines.push(segment.mapLine);
+        const mapCacheBuster = isLive ? `init-${segment.trackId}-${loopIndex}` : undefined;
+        const rewrittenMap = segment.mapLine.replace(
+          /URI="[^"]*"/,
+          `URI="${segmentUrl(segment.trackId, "init.mp4", mapCacheBuster)}"`
+        );
+        bodyLines.push(rewrittenMap);
       }
       lastTrackId = segment.trackId;
     }
     bodyLines.push(`#EXTINF:${segment.duration.toFixed(3)},`);
-    bodyLines.push(segment.uri);
+    const globalSeq = mediaSequence + (i - windowStartIndex);
+    const segCacheBuster = isLive ? `seg-${globalSeq}` : undefined;
+    bodyLines.push(segmentUrl(segment.trackId, segment.uri, segCacheBuster));
   }
   const header = [
     "#EXTM3U",
     "#EXT-X-VERSION:7",
     `#EXT-X-TARGETDURATION:${Math.ceil(maxTargetDuration)}`,
     "#EXT-X-INDEPENDENT-SEGMENTS",
-    `#EXT-X-MEDIA-SEQUENCE:${windowStartIndex}`
+    `#EXT-X-MEDIA-SEQUENCE:${mediaSequence}`
   ];
   if (discontinuitySequence > 0) {
     header.push(`#EXT-X-DISCONTINUITY-SEQUENCE:${discontinuitySequence}`);
@@ -349,7 +386,6 @@ const buildCachedHlsPlaylist = async (
       isComplete: true
     };
   }
-  header.push("#EXT-X-PLAYLIST-TYPE:EVENT");
   return {
     playlist: [...header, ...bodyLines].join("\n"),
     missing,
@@ -973,6 +1009,27 @@ const stopHlsSession = async (
   }
 };
 
+const hlsIdleTimeoutMsRaw = Number(process.env.HLS_IDLE_TIMEOUT_MS ?? 120_000);
+const hlsIdleTimeoutMs =
+  Number.isFinite(hlsIdleTimeoutMsRaw) && hlsIdleTimeoutMsRaw > 0 ? hlsIdleTimeoutMsRaw : 120_000;
+const hlsSweepIntervalMsRaw = Number(process.env.HLS_SWEEP_INTERVAL_MS ?? 15_000);
+const hlsSweepIntervalMs =
+  Number.isFinite(hlsSweepIntervalMsRaw) && hlsSweepIntervalMsRaw > 0
+    ? hlsSweepIntervalMsRaw
+    : 15_000;
+
+// Prevent orphaned/idle stream generators from running forever.
+// Any request to the HLS session playlist/segments refreshes `lastAccess`.
+setInterval(() => {
+  const now = Date.now();
+  for (const [streamId, session] of hlsSessions.entries()) {
+    if (session.stopped) continue;
+    if (now - session.lastAccess > hlsIdleTimeoutMs) {
+      void stopHlsSession(streamId, session, "idle-timeout");
+    }
+  }
+}, hlsSweepIntervalMs).unref?.();
+
 const findNextSegmentIndex = async (dir: string, fallback: number) => {
   try {
     const entries = await fsPromises.readdir(dir);
@@ -1162,6 +1219,11 @@ const runHlsConcatenated = async (
       "160k"
     );
   }
+  if (actualEncoding === "copy") {
+    // Remuxing H.264 from MP4 into MPEG-TS needs AnnexB format.
+    // This improves compatibility for TS-segmented HLS consumers like ffmpeg/XtreamCodes.
+    args.push("-bsf:v", "h264_mp4toannexb");
+  }
   if (actualEncoding !== "copy") {
     // Align segment boundaries to forced keyframes for stable HLS playback.
     args.push("-force_key_frames", hlsForceKeyFrameExpr, "-sc_threshold", "0");
@@ -1178,12 +1240,8 @@ const runHlsConcatenated = async (
     String(hlsDeleteThreshold),
     "-hls_flags",
     hlsFlags,
-    "-hls_segment_type",
-    "fmp4",
-    "-hls_fmp4_init_filename",
-    "init.mp4",
     "-hls_segment_filename",
-    path.join(session.dir, "segment-%06d.m4s"),
+    path.join(session.dir, "segment-%06d.ts"),
     "-start_number",
     String(session.segmentIndex),
     path.join(session.dir, "playlist.m3u8")
@@ -1337,12 +1395,13 @@ const waitForHlsPlaylistReady = async (
 ) => {
   const started = Date.now();
   const playlistPath = path.join(sessionDir, "playlist.m3u8");
-  const initPath = path.join(sessionDir, "init.mp4");
   while (Date.now() - started < timeoutMs) {
     try {
       await fsPromises.stat(playlistPath);
-      await fsPromises.stat(initPath);
       const body = await fsPromises.readFile(playlistPath, "utf8");
+      if (body.includes("#EXT-X-MAP:")) {
+        await fsPromises.stat(path.join(sessionDir, "init.mp4"));
+      }
       const segmentCount = body
         .split(/\r?\n/)
         .filter((line) => line && !line.startsWith("#")).length;
@@ -2159,6 +2218,73 @@ router.get("/:id/hls/playlist.m3u8", async (req, res) => {
     }
   }
   return res.status(503).json({ error: "HLS cache not ready" });
+});
+
+router.get("/:id/hls/live.m3u8", async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid stream id" });
+  }
+  const token = await requireStreamToken(req, res);
+  if (!token) {
+    return;
+  }
+  const stream = await loadStream(id);
+  if (!stream) {
+    return res.status(404).json({ error: "Stream not found" });
+  }
+  if (stream.status !== "active") {
+    return res.status(409).json({ error: "Stream is stopped" });
+  }
+  registerStreamClient(id, req, { path: req.originalUrl ?? req.path });
+  const items = await loadStreamItems(id);
+  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
+    file_path: string;
+    artist_name: string | null;
+  }>;
+  if (availableItems.length === 0) {
+    return res.status(404).json({ error: "No downloadable tracks in this stream" });
+  }
+
+  const session = await ensureHlsSession(stream, availableItems);
+  session.lastAccess = Date.now();
+  const ready = await waitForHlsPlaylistReady(session.dir, 8000, 1);
+  if (!ready) {
+    return res.status(503).json({ error: "HLS session not ready" });
+  }
+
+  const playlistPath = path.join(session.dir, "playlist.m3u8");
+  let body = "";
+  try {
+    body = await fsPromises.readFile(playlistPath, "utf8");
+  } catch {
+    return res.status(503).json({ error: "HLS session not ready" });
+  }
+
+  const baseUrl = await getBaseUrl(req);
+  const tokenParam = encodeURIComponent(token);
+  const segmentUrl = (segment: string) =>
+    `${baseUrl}/api/streams/${id}/hls/${encodeURIComponent(segment)}?token=${tokenParam}`;
+
+  const rewritten = body
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+      if (trimmed.startsWith("#EXT-X-MAP:")) {
+        return trimmed.replace(/URI="([^"]+)"/, (_match, uri) => `URI="${segmentUrl(uri)}"`);
+      }
+      if (trimmed.startsWith("#")) {
+        return trimmed;
+      }
+      return segmentUrl(trimmed);
+    })
+    .join("\n");
+
+  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+  res.setHeader("Cache-Control", "no-store");
+  recordStreamBandwidth(Buffer.byteLength(rewritten));
+  return res.send(rewritten);
 });
 
 router.get("/:id/hls/:segment", async (req, res) => {

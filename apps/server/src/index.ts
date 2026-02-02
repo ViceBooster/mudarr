@@ -7,6 +7,14 @@ import { startStatsSampler } from "./services/statsSampler.js";
 import { requireAuth } from "./middleware/auth.js";
 
 const app = express();
+
+// If running behind a reverse proxy (nginx/traefik/cloudflare), enable this so
+// req.protocol / req.ip behave correctly based on X-Forwarded-* headers.
+const trustProxyRaw = (process.env.TRUST_PROXY ?? "").trim().toLowerCase();
+if (trustProxyRaw === "1" || trustProxyRaw === "true" || trustProxyRaw === "yes") {
+  app.set("trust proxy", true);
+}
+
 app.use(cors());
 app.use(express.json());
 
