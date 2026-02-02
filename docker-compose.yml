@@ -8,12 +8,12 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
 
   server:
     image: ghcr.io/${GHCR_OWNER:-vicebooster}/${GHCR_REPO:-mudarr}/server:latest
@@ -23,7 +23,7 @@ services:
       POSTGRES_HOST: postgres
       REDIS_HOST: redis
     ports:
-      - "3001:3001"
+      - "${API_PORT:-3001}:3001"
     depends_on:
       - postgres
       - redis
@@ -50,7 +50,7 @@ services:
     env_file:
       - .env
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
     depends_on:
       - server
 

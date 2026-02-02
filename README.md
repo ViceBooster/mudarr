@@ -59,8 +59,10 @@ POSTGRES_PASSWORD=changeme
 # Optional but recommended
 MEDIA_ROOT=/data/media
 API_PORT=3001
+WEB_PORT=3000
 REDIS_PORT=6379
 POSTGRES_PORT=5432
+VITE_API_URL=http://localhost:3001
 
 # Optional: move HLS temp files onto the storage volume
 HLS_TMP_DIR=/data/storage/hls
@@ -81,11 +83,12 @@ YT_DLP_COOKIES_FROM_BROWSER=
 
 ### Web API base URL
 
-The web UI defaults to `http://localhost:3001`. If you are running behind a reverse proxy or using a public domain, set `VITE_API_URL` before building the web image:
+The web UI defaults to `http://localhost:3001`. If you change `API_PORT`, set `VITE_API_URL`
+to the same host/port and rebuild the web image.
 
-1. Create `apps/web/.env`:
+1. Create `apps/web/.env` (for local builds):
    ```bash
-   VITE_API_URL=https://api.example.com
+   VITE_API_URL=http://localhost:3001
    ```
 2. Rebuild the web image:
    ```bash
