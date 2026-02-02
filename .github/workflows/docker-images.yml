@@ -47,5 +47,5 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/${{ matrix.app }}:latest
-            ghcr.io/${{ github.repository }}/${{ matrix.app }}:${{ github.sha }}
+            ghcr.io/${{ toLower(github.repository_owner) }}/${{ toLower(github.event.repository.name) }}/${{ matrix.app }}:latest
+            ghcr.io/${{ toLower(github.repository_owner) }}/${{ toLower(github.event.repository.name) }}/${{ matrix.app }}:${{ github.sha }}
