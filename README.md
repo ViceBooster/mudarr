@@ -136,13 +136,6 @@ The included GitHub Actions workflow builds and pushes images to GHCR on every p
 - `ghcr.io/vicebooster/mudarr/web:latest`
 - `ghcr.io/vicebooster/mudarr/worker:latest`
 
-Update your `.env` with the GHCR owner/repo if needed:
-
-```bash
-GHCR_OWNER=your-org-or-username
-GHCR_REPO=your-repo
-```
-
 Then pull and restart:
 
 ```bash
@@ -150,33 +143,6 @@ docker compose pull
 docker compose up -d
 ```
 
-If your images are private, log in first:
-
-```bash
-echo "<ghcr_token>" | docker login ghcr.io -u "<github_username>" --password-stdin
-```
-
-### Release flow (recommended)
-
-The in-app update checker compares your running version to the latest GitHub Release.
-To publish a release:
-
-1. Create a new Git tag (e.g. `v1.2.3`) and push it.
-2. Create a GitHub Release from that tag.
-3. The update checker will show the new version and release link.
-
-Set this in `.env` so the app knows where to check:
-
-```bash
-GITHUB_REPO=vicebooster/mudarr
-```
-
-When you update, pull the latest images and restart:
-
-```bash
-docker compose pull
-docker compose up -d
-```
 
 ## Reverse proxy (single domain)
 
