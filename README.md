@@ -113,7 +113,7 @@ If you want custom host paths, update `docker-compose.yml`:
 
 ```bash
 mkdir -p ./media ./storage
-docker compose up --build -d
+docker compose up -d
 ```
 
 Then open `http://localhost:3000` and complete the initial setup:
@@ -126,6 +126,34 @@ To view logs:
 
 ```bash
 docker compose logs -f server worker
+```
+
+## Deploy with GHCR images
+
+The included GitHub Actions workflow builds and pushes images to GHCR on every push to `main`:
+
+- `ghcr.io/<owner>/<repo>/server:latest`
+- `ghcr.io/<owner>/<repo>/web:latest`
+- `ghcr.io/<owner>/<repo>/worker:latest`
+
+Update your `.env` with the GHCR owner/repo if needed:
+
+```bash
+GHCR_OWNER=your-org-or-username
+GHCR_REPO=your-repo
+```
+
+Then pull and restart:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+If your images are private, log in first:
+
+```bash
+echo "<ghcr_token>" | docker login ghcr.io -u "<github_username>" --password-stdin
 ```
 
 ## Reverse proxy (single domain)

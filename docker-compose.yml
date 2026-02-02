@@ -16,9 +16,7 @@ services:
       - "6379:6379"
 
   server:
-    build:
-      context: .
-      dockerfile: ./apps/server/Dockerfile
+    image: ghcr.io/${GHCR_OWNER:-mudarr}/${GHCR_REPO:-mudarr}/server:latest
     env_file:
       - .env
     environment:
@@ -34,9 +32,7 @@ services:
       - ./media:/data/media
 
   worker:
-    build:
-      context: .
-      dockerfile: ./apps/worker/Dockerfile
+    image: ghcr.io/${GHCR_OWNER:-mudarr}/${GHCR_REPO:-mudarr}/worker:latest
     env_file:
       - .env
     environment:
@@ -50,9 +46,7 @@ services:
       - ./media:/data/media
 
   web:
-    build:
-      context: .
-      dockerfile: ./apps/web/Dockerfile
+    image: ghcr.io/${GHCR_OWNER:-mudarr}/${GHCR_REPO:-mudarr}/web:latest
     env_file:
       - .env
     ports:

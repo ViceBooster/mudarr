@@ -17,6 +17,7 @@ import {
   rotateStreamToken,
   setStreamToken
 } from "../services/streams.js";
+import { getUpdateStatus } from "../services/updates.js";
 
 const router = Router();
 
@@ -330,6 +331,12 @@ router.get("/storage/browse", async (req, res) => {
     parent: parent === resolved ? null : parent,
     entries
   });
+});
+
+router.get("/updates", async (req, res) => {
+  const force = req.query.force === "1" || req.query.force === "true";
+  const status = await getUpdateStatus({ force });
+  res.json(status);
 });
 
 export default router;
