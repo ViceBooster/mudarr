@@ -8,5 +8,5 @@ COPY tsconfig.base.json ./
 COPY apps/server ./apps/server
 WORKDIR /app/apps/server
 RUN npm run build
-EXPOSE 3001
+EXPOSE 3002
 CMD ["node", "dist/index.js"]

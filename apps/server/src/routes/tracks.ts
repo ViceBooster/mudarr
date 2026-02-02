@@ -110,7 +110,7 @@ router.get("/:id/hls/playlist.m3u8", async (req, res) => {
     const tokenParam = encodeURIComponent(token);
     const appendToken = (value: string) =>
       value.includes("?") ? `${value}&token=${tokenParam}` : `${value}?token=${tokenParam}`;
-    const baseUrl = `${req.protocol}://${req.get("host") ?? "localhost:3001"}`;
+    const baseUrl = `${req.protocol}://${req.get("host") ?? "localhost:3002"}`;
     const rewriteSegment = (segment: string) =>
       `${baseUrl}/api/tracks/${id}/hls/${encodeURIComponent(segment)}`;
     const rewritten = body

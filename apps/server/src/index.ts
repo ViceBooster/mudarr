@@ -16,7 +16,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/api", requireAuth, apiRoutes);
 
-const port = Number(process.env.API_PORT ?? 3001);
+const port = Number(process.env.API_PORT ?? 3002);
 
 // Run migrations on startup
 async function startServer() {

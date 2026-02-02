@@ -96,7 +96,7 @@ export const getBaseUrl = async (req: {
   if (publicApiBaseUrl) return publicApiBaseUrl;
   const domain = normalizeDomain(settings.domain);
   if (domain) return domain;
-  const host = req.get("host") ?? "localhost:3001";
+  const host = req.get("host") ?? "localhost:3002";
   return `${req.protocol}://${host}`;
 };
 

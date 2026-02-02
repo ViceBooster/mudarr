@@ -21,7 +21,7 @@ Self-hosted music video automation inspired by Sonarr/Radarr.
 ## Architecture
 
 - `apps/web` (port `3000`): web UI
-- `apps/server` (port `3001`): REST API, streaming, metadata
+- `apps/server` (port `3002`): REST API, streaming, metadata
 - `apps/worker` (no port): background downloads and processing
 - `postgres` (port `5432`): data store
 - `redis` (port `6379`): queue/backplane
@@ -58,7 +58,8 @@ POSTGRES_PASSWORD=changeme
 
 # Optional but recommended
 MEDIA_ROOT=/data/media
-API_PORT=3001
+API_PORT=3002
+HOST_API_PORT=3002
 WEB_PORT=3000
 REDIS_PORT=6379
 POSTGRES_PORT=5432
@@ -83,8 +84,9 @@ YT_DLP_COOKIES_FROM_BROWSER=
 
 ### Web API base URL
 
-The web UI defaults to `http://localhost:3002`. If you change `API_PORT`, set `VITE_API_URL`
-to the same host/port. The web container reads `VITE_API_URL` at startup (no rebuild required).
+The web UI defaults to `http://localhost:3002`. If you expose the API on a different host port
+(`HOST_API_PORT`), set `VITE_API_URL` to that host/port. The web container reads `VITE_API_URL`
+at startup (no rebuild required).
 
 1. Create `apps/web/.env` (for local builds):
    ```bash
@@ -210,7 +212,7 @@ server {
   server_name mudarr.example.com;
 
   location /api/ {
-    proxy_pass http://127.0.0.1:3001/;
+    proxy_pass http://127.0.0.1:3002/;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
