@@ -710,9 +710,11 @@ const shuffleArray = <T,>(items: T[]) => {
   return shuffled;
 };
 
-const escapeFfconcatPath = (value: string) => value.replace(/'/g, "'\\''");
-const toConcatEntry = (filePath: string) =>
-  `file '${escapeFfconcatPath(`file:${filePath}`)}'`;
+// ffconcat is parsed by FFmpeg (not a shell), so keep quoting simple.
+// We avoid `file:` URLs here because some FFmpeg builds behave differently with nested protocols
+// and can fail to detect streams, causing "Output file does not contain any stream".
+const escapeFfconcatPath = (value: string) => value.replace(/'/g, "\\'");
+const toConcatEntry = (filePath: string) => `file '${escapeFfconcatPath(filePath)}'`;
 const buildConcatBody = (items: Array<{ file_path: string }>) =>
   ["ffconcat version 1.0", ...items.map((item) => toConcatEntry(item.file_path))].join("\n");
 const isUsableMediaFile = (filePath: string | null | undefined) => {
@@ -1147,6 +1149,8 @@ const runHlsConcatenated = async (
 
   const hlsFfmpegLogLevel = (process.env.HLS_FFMPEG_LOGLEVEL ?? "error").trim() || "error";
   
+  const protocolWhitelist = (process.env.HLS_FFMPEG_PROTOCOL_WHITELIST ?? "").trim();
+
   const args = [
     "-hide_banner",
     "-loglevel",
@@ -1159,10 +1163,10 @@ const runHlsConcatenated = async (
     "+genpts+discardcorrupt",
     "-err_detect",
     "ignore_err",
-    "-protocol_whitelist",
-    // Some FFmpeg builds use nested protocols when reading media; include common ones.
-    "file,pipe,crypto,data,subfile,concat"
   ];
+  if (protocolWhitelist) {
+    args.push("-protocol_whitelist", protocolWhitelist);
+  }
   
   // For copy mode with seeking, put -ss BEFORE -i for better compatibility
   if (actualEncoding === "copy" && startOffsetSeconds > 0) {
