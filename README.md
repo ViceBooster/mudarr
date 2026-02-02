@@ -130,7 +130,7 @@ docker compose logs -f server worker
 
 ## Deploy with GHCR images
 
-The included GitHub Actions workflow builds and pushes images to GHCR on every push to `main`:
+Available images:
 
 - `ghcr.io/vicebooster/mudarr/server:latest`
 - `ghcr.io/vicebooster/mudarr/web:latest`
@@ -142,9 +142,6 @@ Then pull and restart:
 docker compose pull
 docker compose up -d
 ```
-
-Maintainers: see `README-devs.md` for release and CI notes.
-
 
 ## Reverse proxy (single domain)
 
