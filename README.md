@@ -59,7 +59,7 @@ POSTGRES_PASSWORD=changeme
 # Optional but recommended
 MEDIA_ROOT=/data/media
 API_PORT=3002
-HOST_API_PORT=3002
+API_PORT=3002
 WEB_PORT=3000
 REDIS_PORT=6379
 POSTGRES_PORT=5432
@@ -85,7 +85,7 @@ YT_DLP_COOKIES_FROM_BROWSER=
 ### Web API base URL
 
 The web UI defaults to `http://localhost:3002`. If you expose the API on a different host port
-(`HOST_API_PORT`), set `VITE_API_URL` to that host/port. The web container reads `VITE_API_URL`
+(`API_PORT`), set `VITE_API_URL` to that host/port. The web container reads `VITE_API_URL`
 at startup (no rebuild required).
 
 1. Create `apps/web/.env` (for local builds):
