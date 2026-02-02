@@ -121,6 +121,40 @@ const ensureUniqueMp4Base = (outputDir: string, base: string, trackId?: number |
   return `${base}-${Date.now()}`;
 };
 
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const cleanupYtDlpArtifacts = async (outputDir: string, outputBase: string) => {
+  // yt-dlp sometimes leaves intermediate artifacts like:
+  //   <base>.f137.mp4, <base>.f140.m4a, <base>.temp.mp4
+  // These are safe to delete once the merged final mp4 exists.
+  const finalPath = path.join(outputDir, `${outputBase}.mp4`);
+  try {
+    const stat = await fsPromises.stat(finalPath);
+    if (!stat.isFile() || stat.size <= 0) {
+      return;
+    }
+  } catch {
+    return;
+  }
+
+  const prefix = `${outputBase}.`;
+  const artifactPattern = new RegExp(`^${escapeRegExp(outputBase)}\\.(?:f\\d+|temp)\\..+$`, "i");
+  try {
+    const entries = await fsPromises.readdir(outputDir, { withFileTypes: true });
+    await Promise.all(
+      entries.map(async (entry) => {
+        if (!entry.isFile()) return;
+        const name = entry.name;
+        if (!name.startsWith(prefix)) return;
+        if (!artifactPattern.test(name)) return;
+        await fsPromises.unlink(path.join(outputDir, name)).catch(() => undefined);
+      })
+    );
+  } catch {
+    // ignore cleanup failures
+  }
+};
+
 const buildOutputDir = async (artistName?: string | null, albumTitle?: string | null) => {
   const mediaRoot = await resolveMediaRoot();
   const artist = sanitizeSegment(artistName ?? "Unknown Artist") || "Unknown Artist";
@@ -417,6 +451,10 @@ const downloadWorker = new Worker(
       albumTitle?: string | null;
       source?: string | null;
       prechecked?: boolean;
+      trackId?: number | null;
+      trackTitle?: string | null;
+      artistId?: number | null;
+      outputBase?: string | null;
     };
 
     const metaResult = await pool.query("SELECT status, source FROM download_jobs WHERE id = $1", [
@@ -447,6 +485,19 @@ const downloadWorker = new Worker(
         return;
       }
       if (!shouldFilterByOfficialTitle(resolvedSource, searchSettings)) {
+        const outputDir = await buildOutputDir(artistName, albumTitle);
+        const outputBase =
+          typeof job.data.outputBase === "string" && job.data.outputBase.trim()
+            ? job.data.outputBase.trim()
+            : ensureUniqueMp4Base(
+                outputDir,
+                chooseOutputBaseName({
+                  trackId: typeof job.data.trackId === "number" ? job.data.trackId : null,
+                  title: typeof job.data.trackTitle === "string" ? job.data.trackTitle : null,
+                  fallback: query
+                }),
+                typeof job.data.trackId === "number" ? job.data.trackId : null
+              );
         await downloadQueue.add("download", {
           downloadJobId,
           query,
@@ -454,7 +505,11 @@ const downloadWorker = new Worker(
           quality,
           artistName: artistName ?? null,
           albumTitle: albumTitle ?? null,
-          prechecked: true
+          prechecked: true,
+          trackId: typeof job.data.trackId === "number" ? job.data.trackId : null,
+          trackTitle: typeof job.data.trackTitle === "string" ? job.data.trackTitle : null,
+          artistId: typeof job.data.artistId === "number" ? job.data.artistId : null,
+          outputBase
         });
         return;
       }
@@ -490,6 +545,20 @@ const downloadWorker = new Worker(
         "UPDATE download_jobs SET progress_stage = $1, progress_detail = $2 WHERE id = $3 AND status = 'queued'",
         ["queued", "Queued for download", downloadJobId]
       );
+
+      const outputDir = await buildOutputDir(artistName, albumTitle);
+      const outputBase =
+        typeof job.data.outputBase === "string" && job.data.outputBase.trim()
+          ? job.data.outputBase.trim()
+          : ensureUniqueMp4Base(
+              outputDir,
+              chooseOutputBaseName({
+                trackId: typeof job.data.trackId === "number" ? job.data.trackId : null,
+                title: typeof job.data.trackTitle === "string" ? job.data.trackTitle : null,
+                fallback: query
+              }),
+              typeof job.data.trackId === "number" ? job.data.trackId : null
+            );
       await downloadQueue.add("download", {
         downloadJobId,
         query,
@@ -497,7 +566,11 @@ const downloadWorker = new Worker(
         quality,
         artistName: artistName ?? null,
         albumTitle: albumTitle ?? null,
-        prechecked: true
+        prechecked: true,
+        trackId: typeof job.data.trackId === "number" ? job.data.trackId : null,
+        trackTitle: typeof job.data.trackTitle === "string" ? job.data.trackTitle : null,
+        artistId: typeof job.data.artistId === "number" ? job.data.artistId : null,
+        outputBase
       });
       return;
     }
@@ -542,22 +615,40 @@ const downloadWorker = new Worker(
       ["download_started", `Downloading: ${query}`, { downloadJobId }]
     );
 
-    const jobMeta = await pool.query("SELECT track_id FROM download_jobs WHERE id = $1", [
-      downloadJobId
-    ]);
-    const trackId = jobMeta.rows[0]?.track_id as number | null | undefined;
-    const trackMeta = trackId
-      ? await pool.query(
-          "SELECT t.title, a.artist_id FROM tracks t LEFT JOIN albums a ON a.id = t.album_id WHERE t.id = $1",
-          [trackId]
-        )
-      : { rows: [] as Array<{ title?: string; artist_id?: number | null }> };
-    const trackTitle = (trackMeta.rows[0]?.title as string | undefined) ?? null;
-    const artistId = (trackMeta.rows[0]?.artist_id as number | null | undefined) ?? null;
+    let trackId = typeof job.data.trackId === "number" ? job.data.trackId : null;
+    let trackTitle =
+      typeof job.data.trackTitle === "string" && job.data.trackTitle.trim()
+        ? job.data.trackTitle.trim()
+        : null;
+    let artistId = typeof job.data.artistId === "number" ? job.data.artistId : null;
+
+    // If missing metadata, resolve once and persist to the job payload so retries remain deterministic.
+    if (!trackId || !trackTitle || artistId === null) {
+      const jobMeta = await pool.query(
+        "SELECT dj.track_id, t.title, a.artist_id FROM download_jobs dj LEFT JOIN tracks t ON t.id = dj.track_id LEFT JOIN albums a ON a.id = t.album_id WHERE dj.id = $1",
+        [downloadJobId]
+      );
+      trackId = (jobMeta.rows[0]?.track_id as number | undefined) ?? trackId;
+      trackTitle = (jobMeta.rows[0]?.title as string | undefined) ?? trackTitle;
+      artistId = (jobMeta.rows[0]?.artist_id as number | undefined) ?? artistId;
+    }
 
     const outputDir = await buildOutputDir(artistName, albumTitle);
-    const desiredBase = chooseOutputBaseName({ trackId, title: trackTitle, fallback: query });
-    const outputBase = ensureUniqueMp4Base(outputDir, desiredBase, trackId);
+    let outputBase =
+      typeof job.data.outputBase === "string" && job.data.outputBase.trim()
+        ? job.data.outputBase.trim()
+        : ensureUniqueMp4Base(
+            outputDir,
+            chooseOutputBaseName({ trackId, title: trackTitle, fallback: query }),
+            trackId
+          );
+
+    // Persist for retries (BullMQ supports updating job data).
+    try {
+      await job.updateData({ ...job.data, trackId, trackTitle, artistId, outputBase });
+    } catch {
+      // ignore if job data cannot be updated
+    }
     const downloadStartedAt = Date.now();
     let lastDownloadProgress = -1;
     let lastProcessingProgress = -1;
@@ -677,6 +768,9 @@ const downloadWorker = new Worker(
           );
         }
       }
+
+      // Best-effort cleanup of yt-dlp intermediate artifacts in the album folder.
+      await cleanupYtDlpArtifacts(outputDir, outputBase);
     }
 
     await pool.query(

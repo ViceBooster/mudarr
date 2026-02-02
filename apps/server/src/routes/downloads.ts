@@ -103,13 +103,27 @@ router.post("/", async (req, res) => {
     ["download_queued", `Queued download: ${query}`, { downloadJobId: job.id }]
   );
 
+  let trackTitle: string | null = null;
+  let resolvedArtistId: number | null = null;
+  if (trackId) {
+    const meta = await pool.query(
+      "SELECT t.title, a.artist_id FROM tracks t LEFT JOIN albums a ON a.id = t.album_id WHERE t.id = $1",
+      [trackId]
+    );
+    trackTitle = (meta.rows[0]?.title as string | undefined) ?? null;
+    resolvedArtistId = (meta.rows[0]?.artist_id as number | undefined) ?? null;
+  }
+
   await downloadQueue.add("download", {
     downloadJobId: job.id,
     query,
     source: source ?? "manual",
     quality: quality ?? null,
     artistName: artistName ?? null,
-    albumTitle: albumTitle ?? null
+    albumTitle: albumTitle ?? null,
+    trackId: trackId ?? null,
+    trackTitle,
+    artistId: resolvedArtistId
   });
 
   res.status(201).json(job);

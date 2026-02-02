@@ -508,7 +508,10 @@ router.patch("/:id/albums/monitor", async (req, res) => {
         source: "monitor",
         quality,
         artistName,
-        albumTitle: row.album_title
+        albumTitle: row.album_title,
+        trackId: row.id,
+        trackTitle: row.title,
+        artistId: id
       });
     }
   }

@@ -70,7 +70,10 @@ router.patch("/:id", async (req, res) => {
         source: "monitor",
         quality,
         artistName,
-        albumTitle: album.title
+        albumTitle: album.title,
+        trackId: track.id,
+        trackTitle: track.title,
+        artistId: album.artist_id ?? null
       });
     }
   }

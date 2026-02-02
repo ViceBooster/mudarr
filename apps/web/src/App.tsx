@@ -1972,20 +1972,24 @@ export default function App() {
     setStreamMenuId((prev) => (prev === streamId ? null : streamId));
   };
 
-  const buildStreamHlsUrl = (streamId: number, baseUrl: string) => {
+  type StreamHlsUrlMode = "live" | "cached";
+
+  const buildStreamHlsUrl = (streamId: number, baseUrl: string, mode: StreamHlsUrlMode = "live") => {
     const token = streamSettings?.token || streamToken;
     if (!token) return "";
-    return `${baseUrl}/api/streams/${streamId}/hls/playlist.m3u8?token=${encodeURIComponent(
+    const playlistPath = mode === "live" ? "live.m3u8" : "playlist.m3u8";
+    return `${baseUrl}/api/streams/${streamId}/hls/${playlistPath}?token=${encodeURIComponent(
       token
     )}`;
   };
 
-  const streamLiveUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl);
+  const streamLiveUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl, "live");
+  const streamCachedUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl, "cached");
 
   const shareableStreamUrl = (streamId: number) => {
     const base =
       generalPublicApiBaseUrl.trim() || generalDomain.trim() || apiBaseUrl;
-    return buildStreamHlsUrl(streamId, base);
+    return buildStreamHlsUrl(streamId, base, "live");
   };
 
   const escapeM3uValue = (value: string) =>
@@ -2010,7 +2014,7 @@ export default function App() {
     });
     const lines = sortedStreams
       .map((stream) => {
-        const url = buildStreamHlsUrl(stream.id, base);
+        const url = buildStreamHlsUrl(stream.id, base, "live");
         if (!url) return null;
         const safeName = escapeM3uValue(stream.name || `Stream ${stream.id}`);
         const tags = [
@@ -6666,6 +6670,7 @@ export default function App() {
               {visibleStreams.map((stream) => {
                 const isExpanded = expandedStreamIds.includes(stream.id);
                 const liveUrl = streamLiveUrl(stream.id);
+                const cachedUrl = streamCachedUrl(stream.id);
                 const shareUrl = shareableStreamUrl(stream.id);
                 const isEditing = editingStreamId === stream.id;
                 const resolutionSummary = getResolutionSummary(stream.items);
@@ -6888,13 +6893,25 @@ export default function App() {
                     {shareUrl ? (
                       <div className="mt-2">
                         <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                          Stream URL (HLS)
+                          Stream URL (HLS Live)
                         </div>
                         <input
                           value={shareUrl}
                           readOnly
                           className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs"
                         />
+                        {isExpanded && cachedUrl ? (
+                          <div className="mt-3">
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                              Stream URL (HLS Cached)
+                            </div>
+                            <input
+                              value={cachedUrl}
+                              readOnly
+                              className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs"
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     ) : (
                       <div className="mt-1.5 text-xs text-slate-500">

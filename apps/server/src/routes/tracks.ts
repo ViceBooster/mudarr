@@ -328,7 +328,10 @@ router.patch("/:id", async (req, res) => {
       source: "monitor",
       quality,
       artistName,
-      albumTitle
+      albumTitle,
+      trackId: track.id,
+      trackTitle: track.title,
+      artistId: artistId ?? null
     });
   }
 
