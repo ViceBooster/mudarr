@@ -16,7 +16,7 @@ services:
       - "6379:6379"
 
   server:
-    image: ghcr.io/${GHCR_OWNER:-mudarr}/${GHCR_REPO:-mudarr}/server:latest
+    image: ghcr.io/${GHCR_OWNER:-vicebooster}/${GHCR_REPO:-mudarr}/server:latest
     env_file:
       - .env
     environment:
@@ -32,7 +32,7 @@ services:
       - ./media:/data/media
 
   worker:
-    image: ghcr.io/${GHCR_OWNER:-mudarr}/${GHCR_REPO:-mudarr}/worker:latest
+    image: ghcr.io/${GHCR_OWNER:-vicebooster}/${GHCR_REPO:-mudarr}/worker:latest
     env_file:
       - .env
     environment:
@@ -46,7 +46,7 @@ services:
       - ./media:/data/media
 
   web:
-    image: ghcr.io/${GHCR_OWNER:-mudarr}/${GHCR_REPO:-mudarr}/web:latest
+    image: ghcr.io/${GHCR_OWNER:-vicebooster}/${GHCR_REPO:-mudarr}/web:latest
     env_file:
       - .env
     ports:
