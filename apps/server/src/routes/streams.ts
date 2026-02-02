@@ -1219,33 +1219,63 @@ const runHlsConcatenated = async (
       "160k"
     );
   }
-  if (actualEncoding === "copy") {
-    // Remuxing H.264 from MP4 into MPEG-TS needs AnnexB format.
-    // This improves compatibility for TS-segmented HLS consumers like ffmpeg/XtreamCodes.
-    args.push("-bsf:v", "h264_mp4toannexb");
-  }
   if (actualEncoding !== "copy") {
     // Align segment boundaries to forced keyframes for stable HLS playback.
     args.push("-force_key_frames", hlsForceKeyFrameExpr, "-sc_threshold", "0");
   }
   args.push("-max_muxing_queue_size", "2048", "-muxpreload", "0", "-muxdelay", "0");
-  args.push(
-    "-f",
-    "hls",
-    "-hls_time",
-    String(hlsSegmentDurationSeconds),
-    "-hls_list_size",
-    String(hlsListSize),
-    "-hls_delete_threshold",
-    String(hlsDeleteThreshold),
-    "-hls_flags",
-    hlsFlags,
-    "-hls_segment_filename",
-    path.join(session.dir, "segment-%06d.ts"),
-    "-start_number",
-    String(session.segmentIndex),
-    path.join(session.dir, "playlist.m3u8")
-  );
+
+  // fMP4 HLS is the default: stable and broadly supported by modern players/ffmpeg.
+  // TS segments can be enabled if needed via HLS_SEGMENT_TYPE=ts|mpegts.
+  const segmentTypeRaw = (process.env.HLS_SEGMENT_TYPE ?? "fmp4").trim().toLowerCase();
+  const useTs = segmentTypeRaw === "ts" || segmentTypeRaw === "mpegts" || segmentTypeRaw === "mpeg-ts";
+  if (useTs) {
+    if (actualEncoding === "copy") {
+      // Remuxing H.264 from MP4 into MPEG-TS needs AnnexB format.
+      args.push("-bsf:v", "h264_mp4toannexb");
+    }
+    args.push(
+      "-f",
+      "hls",
+      "-hls_segment_type",
+      "mpegts",
+      "-hls_time",
+      String(hlsSegmentDurationSeconds),
+      "-hls_list_size",
+      String(hlsListSize),
+      "-hls_delete_threshold",
+      String(hlsDeleteThreshold),
+      "-hls_flags",
+      hlsFlags,
+      "-hls_segment_filename",
+      path.join(session.dir, "segment-%06d.ts"),
+      "-start_number",
+      String(session.segmentIndex),
+      path.join(session.dir, "playlist.m3u8")
+    );
+  } else {
+    args.push(
+      "-f",
+      "hls",
+      "-hls_segment_type",
+      "fmp4",
+      "-hls_time",
+      String(hlsSegmentDurationSeconds),
+      "-hls_list_size",
+      String(hlsListSize),
+      "-hls_delete_threshold",
+      String(hlsDeleteThreshold),
+      "-hls_flags",
+      hlsFlags,
+      "-hls_fmp4_init_filename",
+      "init.mp4",
+      "-hls_segment_filename",
+      path.join(session.dir, "segment-%06d.m4s"),
+      "-start_number",
+      String(session.segmentIndex),
+      path.join(session.dir, "playlist.m3u8")
+    );
+  }
 
   return new Promise<void>((resolve) => {
     console.log(
