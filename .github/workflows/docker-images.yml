@@ -40,6 +40,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare image names
+        id: meta
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          repo="${repo,,}"
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -47,5 +56,5 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/${{ toLower(github.repository_owner) }}/${{ toLower(github.event.repository.name) }}/${{ matrix.app }}:latest
-            ghcr.io/${{ toLower(github.repository_owner) }}/${{ toLower(github.event.repository.name) }}/${{ matrix.app }}:${{ github.sha }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}/${{ matrix.app }}:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}/${{ matrix.app }}:${{ github.sha }}
