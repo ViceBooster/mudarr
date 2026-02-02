@@ -132,9 +132,9 @@ docker compose logs -f server worker
 
 The included GitHub Actions workflow builds and pushes images to GHCR on every push to `main`:
 
-- `ghcr.io/<owner>/<repo>/server:latest`
-- `ghcr.io/<owner>/<repo>/web:latest`
-- `ghcr.io/<owner>/<repo>/worker:latest`
+- `ghcr.io/vicebooster/mudarr/server:latest`
+- `ghcr.io/vicebooster/mudarr/web:latest`
+- `ghcr.io/vicebooster/mudarr/worker:latest`
 
 Update your `.env` with the GHCR owner/repo if needed:
 
