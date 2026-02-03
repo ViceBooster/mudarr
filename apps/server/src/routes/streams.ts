@@ -102,6 +102,7 @@ type HlsSession = {
   ordered: Array<{ file_path: string; artist_name: string | null }>;
   startOffsetSeconds: number;
   runner: Promise<void> | null;
+  lastPlaylistUpdate: number;
 };
 const hlsSessions = new Map<number, HlsSession>();
 const resolveHlsRootDir = () => {
@@ -1256,6 +1257,9 @@ const runHlsConcatenated = async (
     "+genpts+discardcorrupt",
     "-err_detect",
     "ignore_err",
+    // Force all timestamps to be non-negative to avoid PTS/DTS discontinuities at track boundaries
+    "-avoid_negative_ts",
+    "make_zero"
   ];
   if (protocolWhitelist) {
     args.push("-protocol_whitelist", protocolWhitelist);
@@ -1279,7 +1283,10 @@ const runHlsConcatenated = async (
   // Encoding modes: copy = no transcode, web/transcode = re-encode
   if (actualEncoding === "copy") {
     // Just copy streams - no transcoding, minimal CPU!
-    args.push("-c", "copy");
+    // For concat+copy, use setpts filter to reset timestamps at each track boundary
+    args.push("-c:v", "copy", "-c:a", "copy");
+    // Apply a simple filter to reset PTS at discontinuities (helps with concat boundaries)
+    args.push("-af", "asetpts=PTS-STARTPTS", "-vf", "setpts=PTS-STARTPTS");
   } else if (actualEncoding === "web") {
     // CPU encoding optimized for lower CPU usage
     args.push(
@@ -1335,7 +1342,13 @@ const runHlsConcatenated = async (
     // Align segment boundaries to forced keyframes for stable HLS playback.
     args.push("-force_key_frames", hlsForceKeyFrameExpr, "-sc_threshold", "0");
   }
-  args.push("-max_muxing_queue_size", "2048", "-muxpreload", "0", "-muxdelay", "0");
+  args.push(
+    "-max_muxing_queue_size", "2048",
+    "-muxpreload", "0",
+    "-muxdelay", "0",
+    // Disable packet interleaving to avoid timestamp reordering issues at concat boundaries
+    "-max_interleave_delta", "0"
+  );
 
   // fMP4 HLS is the default: stable and broadly supported by modern players/ffmpeg.
   // TS segments can be enabled if needed via HLS_SEGMENT_TYPE=ts|mpegts.
@@ -1344,7 +1357,8 @@ const runHlsConcatenated = async (
   if (useTs) {
     if (actualEncoding === "copy") {
       // Remuxing H.264 from MP4 into MPEG-TS needs AnnexB format.
-      args.push("-bsf:v", "h264_mp4toannexb");
+      // Use dump_extra to ensure SPS/PPS are written to every keyframe, improving resilience at track boundaries.
+      args.push("-bsf:v", "h264_mp4toannexb,dump_extra");
     }
     args.push(
       "-f",
@@ -1399,6 +1413,7 @@ const runHlsConcatenated = async (
     const ffmpeg = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
     session.currentProcess = ffmpeg;
     session.processStartedAt = Date.now();
+    session.lastPlaylistUpdate = Date.now();
     if (typeof ffmpeg.pid === "number") {
       void writeStreamPidInfo(session.streamId, ffmpeg.pid, session.dir);
     }
@@ -1437,6 +1452,30 @@ const runHlsConcatenated = async (
       }
       resolve({ code: code ?? null, signal: (signal as NodeJS.Signals | null) ?? null });
     });
+    
+    // Watchdog: if the playlist stops updating (FFmpeg stalls at track boundary),
+    // forcefully kill FFmpeg so the generator loop can restart it.
+    const watchdogIntervalMs = 15000;
+    const watchdogTimeoutMs = 45000;
+    const watchdog = setInterval(() => {
+      if (resolved || session.stopped) {
+        clearInterval(watchdog);
+        return;
+      }
+      const now = Date.now();
+      const timeSinceUpdate = now - session.lastPlaylistUpdate;
+      if (timeSinceUpdate > watchdogTimeoutMs) {
+        console.warn(
+          `Stream ${session.streamId}: playlist stalled for ${Math.floor(timeSinceUpdate / 1000)}s; killing FFmpeg (pid=${ffmpeg.pid ?? "unknown"})`
+        );
+        clearInterval(watchdog);
+        try {
+          ffmpeg.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }
+    }, watchdogIntervalMs);
   });
 };
 
@@ -1542,7 +1581,8 @@ const ensureHlsSession = async (
     encoding: resolvedEncoding,
     ordered: [...playback.ordered],
     startOffsetSeconds: 0,
-    runner: null
+    runner: null,
+    lastPlaylistUpdate: Date.now()
   };
   hlsSessions.set(stream.id, session);
   
@@ -2461,6 +2501,8 @@ router.get("/:id/hls/live.m3u8", async (req, res) => {
   let body = "";
   try {
     body = await fsPromises.readFile(playlistPath, "utf8");
+    // Mark that we successfully read a new/updated playlist
+    session.lastPlaylistUpdate = Date.now();
   } catch {
     return res.status(503).json({ error: "HLS session not ready" });
   }
@@ -2532,6 +2574,10 @@ router.get("/:id/hls/:segment", async (req, res) => {
   const ready = await waitForFile(segmentPath, 8000);
   if (!ready) {
     return res.status(404).json({ error: "Segment not found" });
+  }
+  // Mark that a new segment was successfully accessed (playlist is progressing)
+  if (segment.match(/segment-\d+\.(ts|m4s)$/)) {
+    session.lastPlaylistUpdate = Date.now();
   }
   try {
     const stats = await fsPromises.stat(segmentPath);

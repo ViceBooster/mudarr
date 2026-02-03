@@ -16,6 +16,7 @@ import { LoadingScreen } from "./app/screens/LoadingScreen";
 import { LoginScreen } from "./app/screens/LoginScreen";
 import { SetupErrorScreen } from "./app/screens/SetupErrorScreen";
 import { Sidebar } from "./app/components/Sidebar";
+import { useActiveStreamsCount } from "./features/streams/useActiveStreamsCount";
 import { StorageBrowserModal } from "./app/components/StorageBrowserModal";
 import { AppMain } from "./app/components/AppMain";
 import { getResolutionSummary } from "./features/streams/utils";
@@ -297,6 +298,7 @@ export default function App() {
   const canUseApi = setupComplete && authStatus === "authenticated";
 
   const streamsEnabled = streamEnabled;
+  const { activeStreamsCount } = useActiveStreamsCount({ canUseApi, streamsEnabled, apiGet });
 
   const {
     genreImportId,
@@ -2182,6 +2184,7 @@ export default function App() {
           visibleTabs={visibleTabs}
           activeTab={activeTab}
           isStreamCreateRoute={isStreamCreateRoute}
+          activeStreamsCount={activeStreamsCount}
           activeSettingsTab={activeSettingsTab}
           settingsTabs={settingsTabs}
           artistImportJobs={artistImportJobs}

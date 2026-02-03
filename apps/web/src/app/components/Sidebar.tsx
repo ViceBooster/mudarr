@@ -19,6 +19,7 @@ type SidebarProps = {
   visibleTabs: readonly TabId[];
   activeTab: TabId;
   isStreamCreateRoute: boolean;
+  activeStreamsCount: number;
   activeSettingsTab: SettingsTabId;
   settingsTabs: readonly SettingsTab[];
   artistImportJobs: readonly ArtistImportJob[];
@@ -33,6 +34,7 @@ export const Sidebar = ({
   visibleTabs,
   activeTab,
   isStreamCreateRoute,
+  activeStreamsCount,
   activeSettingsTab,
   settingsTabs,
   artistImportJobs,
@@ -53,6 +55,7 @@ export const Sidebar = ({
     <nav className="mt-6 space-y-1 flex-1">
       {visibleTabs.map((tab) => {
         if (tab === "Streams") {
+          const showBadge = activeStreamsCount > 0;
           return (
             <div key={tab} className="space-y-1">
               <button
@@ -65,7 +68,12 @@ export const Sidebar = ({
               >
                 <span className="flex items-center gap-2">
                   {tabIcon(tab)}
-                  <span>Streams</span>
+                  <span className="flex-1">Streams</span>
+                  {showBadge && (
+                    <span className="ml-auto inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-emerald-500 text-white text-[10px] leading-none">
+                      {activeStreamsCount}
+                    </span>
+                  )}
                 </span>
               </button>
               {activeTab === "Streams" && (
