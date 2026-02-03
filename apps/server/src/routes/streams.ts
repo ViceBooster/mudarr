@@ -2363,6 +2363,9 @@ router.get("/:id/hls/live.m3u8", async (req, res) => {
   if (!token) {
     return;
   }
+  const ip = getClientIp(req);
+  const userAgent = getClientUserAgent(req);
+  console.log(`Stream ${id}: live.m3u8 requested (ip=${ip}, ua=${userAgent ?? "unknown"})`);
   const stream = await loadStream(id);
   if (!stream) {
     return res.status(404).json({ error: "Stream not found" });
@@ -2380,7 +2383,13 @@ router.get("/:id/hls/live.m3u8", async (req, res) => {
     return res.status(404).json({ error: "No downloadable tracks in this stream" });
   }
 
+  const ensureStart = Date.now();
+  console.log(`Stream ${id}: ensuring HLS session (${availableItems.length} items)`);
   const session = await ensureHlsSession(stream, availableItems);
+  console.log(
+    `Stream ${id}: ensureHlsSession completed in ${Date.now() - ensureStart}ms ` +
+      `(dir=${session.dir}, pid=${session.currentProcess?.pid ?? "none"})`
+  );
   session.lastAccess = Date.now();
   const ready = await waitForHlsPlaylistReady(session.dir, hlsLiveReadyTimeoutMs, 1);
   if (!ready) {
