@@ -1236,6 +1236,8 @@ const runHlsConcatenated = async (
   }
 
   const hlsFfmpegLogLevel = (process.env.HLS_FFMPEG_LOGLEVEL ?? "error").trim() || "error";
+  const hlsX264Profile = (process.env.HLS_X264_PROFILE ?? "baseline").trim();
+  const hlsX264Level = (process.env.HLS_X264_LEVEL ?? "4.1").trim();
   
   const protocolWhitelist = (process.env.HLS_FFMPEG_PROTOCOL_WHITELIST ?? "").trim();
 
@@ -1280,10 +1282,6 @@ const runHlsConcatenated = async (
     args.push(
       "-c:v",
       "libx264",
-      "-profile:v",
-      "baseline",
-      "-level",
-      "3.1",
       "-pix_fmt",
       "yuv420p",
       "-preset",
@@ -1297,6 +1295,12 @@ const runHlsConcatenated = async (
       "-b:a",
       "128k"
     );
+    if (hlsX264Profile) {
+      args.push("-profile:v", hlsX264Profile);
+    }
+    if (hlsX264Level) {
+      args.push("-level", hlsX264Level);
+    }
   } else {
     // CPU encoding optimized for lower CPU usage
     args.push(
@@ -1313,6 +1317,12 @@ const runHlsConcatenated = async (
       "-b:a",
       "160k"
     );
+    if (hlsX264Profile) {
+      args.push("-profile:v", hlsX264Profile);
+    }
+    if (hlsX264Level) {
+      args.push("-level", hlsX264Level);
+    }
   }
 
   // Be explicit about mapping. This avoids edge cases where FFmpeg selects no streams.

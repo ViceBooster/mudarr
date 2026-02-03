@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   apiBaseUrl,
@@ -736,7 +736,7 @@ export default function App() {
     }
   }
 
-  const loadDownloadsOnly = async () => {
+  const loadDownloadsOnly = useCallback(async () => {
     if (!canUseApi) return;
     try {
       const downloadData = await apiGet<DownloadJob[]>("/api/downloads");
@@ -744,7 +744,7 @@ export default function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load downloads");
     }
-  };
+  }, [apiGet, canUseApi]);
 
   const loadDashboardStats = async () => {
     if (!canUseApi) return;
@@ -767,7 +767,7 @@ export default function App() {
     }
   };
 
-  const loadArtistsOnly = async () => {
+  const loadArtistsOnly = useCallback(async () => {
     if (!canUseApi) return;
     try {
       const artistData = await apiGet<Artist[]>("/api/artists");
@@ -775,7 +775,7 @@ export default function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load artists");
     }
-  };
+  }, [apiGet, canUseApi]);
 
   const loadArtistImportJobs = async () => {
     if (!canUseApi) return;
