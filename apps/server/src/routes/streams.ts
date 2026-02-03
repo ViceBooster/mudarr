@@ -1283,10 +1283,9 @@ const runHlsConcatenated = async (
   // Encoding modes: copy = no transcode, web/transcode = re-encode
   if (actualEncoding === "copy") {
     // Just copy streams - no transcoding, minimal CPU!
-    // For concat+copy, use setpts filter to reset timestamps at each track boundary
-    args.push("-c:v", "copy", "-c:a", "copy");
-    // Apply a simple filter to reset PTS at discontinuities (helps with concat boundaries)
-    args.push("-af", "asetpts=PTS-STARTPTS", "-vf", "setpts=PTS-STARTPTS");
+    // NOTE: Do NOT add audio/video filters in copy mode — filtering requires decoding and
+    // is incompatible with streamcopy ("Filtering and streamcopy cannot be used together").
+    args.push("-c", "copy");
   } else if (actualEncoding === "web") {
     // CPU encoding optimized for lower CPU usage
     args.push(
