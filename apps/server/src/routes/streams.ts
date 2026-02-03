@@ -1111,6 +1111,18 @@ const checkTracksCodecCompatibility = async (
     const checks = await Promise.all(
       items.slice(0, samplesToCheck).map(async (item) => {
         return new Promise<boolean>((resolve) => {
+          let resolved = false;
+          const finish = (value: boolean) => {
+            if (resolved) return;
+            resolved = true;
+            resolve(value);
+          };
+          const timeout = setTimeout(() => {
+            console.warn(
+              `Stream codec check: ffprobe timed out for ${item.file_path}; falling back to transcode`
+            );
+            finish(false);
+          }, 3000);
           const ffprobe = spawn("ffprobe", [
             "-v",
             "error",
@@ -1128,7 +1140,17 @@ const checkTracksCodecCompatibility = async (
             });
           }
           
+          ffprobe.on("error", (error) => {
+            clearTimeout(timeout);
+            console.warn(
+              `Stream codec check: ffprobe failed for ${item.file_path}; falling back to transcode`,
+              error
+            );
+            finish(false);
+          });
+          
           ffprobe.on("close", () => {
+            clearTimeout(timeout);
             try {
               const result = JSON.parse(output);
               const streams = result.streams || [];
@@ -1139,18 +1161,16 @@ const checkTracksCodecCompatibility = async (
               const compatible =
                 (videoCodec ? videoCodec === "h264" : true) &&
                 (audioCodec ? audioCodec === "aac" : true);
-              resolve(compatible);
+              finish(compatible);
             } catch {
-              resolve(false);
+              finish(false);
             }
           });
-          
-          ffprobe.on("error", () => resolve(false));
         });
       })
     );
     
-    return checks.every(compatible => compatible);
+    return checks.every((compatible) => compatible);
   } catch {
     return false;
   }
