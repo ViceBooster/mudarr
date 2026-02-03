@@ -720,7 +720,7 @@ const downloadWorker = new Worker(
       }
     );
 
-    const resolvedFilePath =
+    let resolvedFilePath =
       filePaths.find((filePath) => filePath) ?? findNewestFile(outputDir, downloadStartedAt);
     const statusCheck = await pool.query("SELECT status FROM download_jobs WHERE id = $1", [
       downloadJobId
@@ -729,6 +729,24 @@ const downloadWorker = new Worker(
       return;
     }
     if (resolvedFilePath) {
+      if (trackTitle) {
+        const desiredBase = ensureUniqueMp4Base(
+          outputDir,
+          chooseOutputBaseName({ trackId, title: trackTitle }),
+          trackId
+        );
+        const resolvedExt = path.extname(resolvedFilePath) || ".mp4";
+        const desiredPath = path.join(outputDir, `${desiredBase}${resolvedExt}`);
+        if (resolvedFilePath !== desiredPath) {
+          try {
+            await fsPromises.rename(resolvedFilePath, desiredPath);
+            resolvedFilePath = desiredPath;
+            outputBase = desiredBase;
+          } catch (error) {
+            console.warn(`Failed to rename file to ${desiredPath}`, error);
+          }
+        }
+      }
       if (trackId) {
         const title = trackTitle ?? path.basename(resolvedFilePath);
         const existingVideo = await pool.query("SELECT id FROM videos WHERE track_id = $1", [
