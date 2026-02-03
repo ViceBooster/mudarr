@@ -6,6 +6,7 @@ import { z } from "zod";
 import pool from "../db/pool.js";
 import downloadQueue from "../queue/downloadQueue.js";
 import { getMediaInfo } from "../services/media.js";
+import { recordStreamBandwidth } from "../services/streamMetrics.js";
 import { requireStreamToken } from "../services/streamAuth.js";
 
 const router = Router();
@@ -68,7 +69,15 @@ router.get("/:id/stream", async (req, res) => {
 
   const sendFull = () => {
     res.setHeader("Content-Length", fileSize);
-    return fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => recordStreamBandwidth(chunk.length));
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to stream track" });
+      }
+    });
+    res.on("close", () => stream.destroy());
+    return stream.pipe(res);
   };
 
   if (range) {
@@ -85,7 +94,15 @@ router.get("/:id/stream", async (req, res) => {
     res.status(206);
     res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
     res.setHeader("Content-Length", end - start + 1);
-    return fs.createReadStream(filePath, { start, end }).pipe(res);
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.on("data", (chunk) => recordStreamBandwidth(chunk.length));
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to stream track" });
+      }
+    });
+    res.on("close", () => stream.destroy());
+    return stream.pipe(res);
   }
 
   return sendFull();
@@ -130,6 +147,7 @@ router.get("/:id/hls/playlist.m3u8", async (req, res) => {
       .join("\n");
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Cache-Control", "no-store");
+    recordStreamBandwidth(Buffer.byteLength(rewritten));
     return res.send(rewritten);
   } catch {
     return res.status(404).json({ error: "HLS playlist not found" });
@@ -163,6 +181,7 @@ router.get("/:id/hls/:segment", async (req, res) => {
     if (!stats.isFile()) {
       return res.status(404).json({ error: "Segment not found" });
     }
+    res.setHeader("Content-Length", stats.size);
   } catch {
     return res.status(404).json({ error: "Segment not found" });
   }
@@ -176,7 +195,16 @@ router.get("/:id/hls/:segment", async (req, res) => {
     res.setHeader("Content-Type", "application/octet-stream");
   }
   res.setHeader("Cache-Control", "no-store");
-  return res.sendFile(segmentPath);
+  const stream = fs.createReadStream(segmentPath);
+  stream.on("data", (chunk) => recordStreamBandwidth(chunk.length));
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to stream segment" });
+    }
+  });
+  res.on("close", () => stream.destroy());
+  stream.pipe(res as unknown as NodeJS.WritableStream);
+  return;
 });
 
 router.get("/:id/media-info", async (req, res) => {

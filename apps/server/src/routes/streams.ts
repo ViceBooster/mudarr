@@ -1414,9 +1414,9 @@ const runHlsConcatenated = async (
     "-max_interleave_delta", "0"
   );
 
-  // fMP4 HLS is the default: stable and broadly supported by modern players/ffmpeg.
-  // TS segments can be enabled if needed via HLS_SEGMENT_TYPE=ts|mpegts.
-  const segmentTypeRaw = (process.env.HLS_SEGMENT_TYPE ?? "fmp4").trim().toLowerCase();
+  // TS segments are the default for broad compatibility with IPTV restreamers.
+  // fMP4 can be enabled via HLS_SEGMENT_TYPE=fmp4.
+  const segmentTypeRaw = (process.env.HLS_SEGMENT_TYPE ?? "mpegts").trim().toLowerCase();
   const useTs = segmentTypeRaw === "ts" || segmentTypeRaw === "mpegts" || segmentTypeRaw === "mpeg-ts";
   if (useTs) {
     if (actualEncoding === "copy") {
@@ -2688,8 +2688,8 @@ router.get("/:id/hls/playlist.m3u8", async (req, res) => {
   return res.status(503).json({ error: "HLS cache not ready" });
 });
 
-// "Radio" HLS: always uses the cached playlist flow (never the live ffmpeg session).
-// Intended for restreamers/clients that don't support /hls/live.m3u8 well.
+// "Radio" HLS: restreamer-friendly live HLS playlist (single ffmpeg session).
+// This provides the smoothest transitions across tracks for IPTV/restreamers.
 router.get("/:id/hls/radio.m3u8", async (req, res) => {
   const id = Number(req.params.id);
   if (Number.isNaN(id)) {
@@ -2699,6 +2699,9 @@ router.get("/:id/hls/radio.m3u8", async (req, res) => {
   if (!token) {
     return;
   }
+  const ip = getClientIp(req);
+  const userAgent = getClientUserAgent(req);
+  console.log(`Stream ${id}: radio.m3u8 requested (ip=${ip}, ua=${userAgent ?? "unknown"})`);
   const stream = await loadStream(id);
   if (!stream) {
     return res.status(404).json({ error: "Stream not found" });
@@ -2711,61 +2714,63 @@ router.get("/:id/hls/radio.m3u8", async (req, res) => {
   const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
     file_path: string;
     artist_name: string | null;
-    track_id: number;
-    title: string;
   }>;
   if (availableItems.length === 0) {
     return res.status(404).json({ error: "No downloadable tracks in this stream" });
   }
 
-  const playback = buildStreamPlaybackPlan(stream, availableItems);
-  const baseUrl = await getBaseUrl(req);
-  const elapsedSeconds = getStreamElapsedSeconds(stream);
-  const cachedResult = await buildCachedHlsPlaylist(
-    playback.ordered as Array<{
-      track_id: number;
-      file_path: string;
-      artist_name: string | null;
-      title: string;
-    }>,
-    baseUrl,
-    token,
-    elapsedSeconds
+  const ensureStart = Date.now();
+  console.log(`Stream ${id}: ensuring HLS session (${availableItems.length} items)`);
+  const session = await ensureHlsSession(stream, availableItems);
+  console.log(
+    `Stream ${id}: ensureHlsSession completed in ${Date.now() - ensureStart}ms ` +
+      `(dir=${session.dir}, pid=${session.currentProcess?.pid ?? "none"})`
   );
-  if (cachedResult.playlist) {
-    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-    res.setHeader("Cache-Control", "no-store");
-    recordStreamBandwidth(Buffer.byteLength(cachedResult.playlist));
-    return res.send(cachedResult.playlist);
-  }
-
-  if (cachedResult.missing.length > 0) {
-    await Promise.all(cachedResult.missing.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
-  }
-
-  if (playback.ordered.length > 0) {
-    const first = playback.ordered[0] as { track_id: number; file_path: string };
-    await waitForTrackHlsReady(first.file_path, first.track_id, hlsRadioReadyTimeoutMs);
-    const retryResult = await buildCachedHlsPlaylist(
-      playback.ordered as Array<{
-        track_id: number;
-        file_path: string;
-        artist_name: string | null;
-        title: string;
-      }>,
-      baseUrl,
-      token,
-      elapsedSeconds
+  session.lastAccess = Date.now();
+  const ready = await waitForHlsPlaylistReady(session.dir, hlsRadioReadyTimeoutMs, 1);
+  if (!ready) {
+    const pid = session.currentProcess?.pid;
+    const uptime = getFfmpegUptimeSeconds(id);
+    console.warn(
+      `Stream ${id}: HLS session not ready after ${hlsRadioReadyTimeoutMs}ms ` +
+        `(pid=${typeof pid === "number" ? pid : "none"}, uptime=${uptime ?? "n/a"}s, dir=${session.dir})`
     );
-    if (retryResult.playlist) {
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      res.setHeader("Cache-Control", "no-store");
-      recordStreamBandwidth(Buffer.byteLength(retryResult.playlist));
-      return res.send(retryResult.playlist);
-    }
+    return res.status(503).json({ error: "HLS session not ready" });
   }
 
-  return res.status(503).json({ error: "HLS cache not ready" });
+  const playlistPath = path.join(session.dir, "playlist.m3u8");
+  let body = "";
+  try {
+    body = await fsPromises.readFile(playlistPath, "utf8");
+    session.lastPlaylistUpdate = Date.now();
+  } catch {
+    return res.status(503).json({ error: "HLS session not ready" });
+  }
+
+  const baseUrl = await getBaseUrl(req);
+  const tokenParam = encodeURIComponent(token);
+  const segmentUrl = (segment: string) =>
+    `${baseUrl}/api/streams/${id}/hls/${encodeURIComponent(segment)}?token=${tokenParam}`;
+
+  const rewritten = body
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+      if (trimmed.startsWith("#EXT-X-MAP:")) {
+        return trimmed.replace(/URI="([^"]+)"/, (_match, uri) => `URI="${segmentUrl(uri)}"`);
+      }
+      if (trimmed.startsWith("#")) {
+        return trimmed;
+      }
+      return segmentUrl(trimmed);
+    })
+    .join("\n");
+
+  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+  res.setHeader("Cache-Control", "no-store");
+  recordStreamBandwidth(Buffer.byteLength(rewritten));
+  return res.send(rewritten);
 });
 
 router.get("/:id/hls/live.m3u8", async (req, res) => {
