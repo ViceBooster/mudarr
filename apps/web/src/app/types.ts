@@ -280,6 +280,15 @@ export type StreamSummary = {
   items: StreamItem[];
 };
 
+export type StreamHlsPrecacheStatus = {
+  streamId: number;
+  total: number;
+  cached: number;
+  missing: number;
+  percent: number;
+  isComplete: boolean;
+};
+
 export type TrackMediaInfo = {
   bytes: number | null;
   duration: number | null;

@@ -1,5 +1,6 @@
 import React from "react";
 
+import type { StreamHlsPrecacheStatus } from "../../app/types";
 import {
   AudioIcon,
   CloseIcon,
@@ -81,6 +82,7 @@ type StreamsListProps<
 
   expandedStreamIds: number[];
   toggleStreamExpanded: (streamId: number) => void;
+  streamHlsPrecacheStatus: Record<number, StreamHlsPrecacheStatus>;
 
   streamMenuId: number | null;
   setStreamMenuId: React.Dispatch<React.SetStateAction<number | null>>;
@@ -118,6 +120,7 @@ export function StreamsList<
   streamsLoading,
   expandedStreamIds,
   toggleStreamExpanded,
+  streamHlsPrecacheStatus,
   streamMenuId,
   setStreamMenuId,
   streamMenuRef,
@@ -150,6 +153,7 @@ export function StreamsList<
           const liveUrl = streamLiveUrl(stream.id);
           const cachedUrl = streamCachedUrl(stream.id);
           const shareUrl = shareableStreamUrl(stream.id);
+          const hlsStatus = streamHlsPrecacheStatus[stream.id];
           const isEditing = editingStreamId === stream.id;
           const resolutionSummary = getResolutionSummary(stream.items);
           const isRestarting = restartingStreamIds.includes(stream.id);
@@ -394,6 +398,29 @@ export function StreamsList<
                         readOnly
                         className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs"
                       />
+                      {hlsStatus && hlsStatus.total > 0 ? (
+                        <div className="mt-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                          <div className="flex items-center justify-between gap-2 text-[10px] font-semibold text-slate-600">
+                            <span className="uppercase tracking-wide text-slate-400">HLS cache</span>
+                            <span className="text-slate-700">
+                              {hlsStatus.cached}/{hlsStatus.total} ({hlsStatus.percent}%)
+                            </span>
+                          </div>
+                          <div className="mt-1.5 h-2 w-full rounded-full bg-slate-100">
+                            <div
+                              className={`h-2 rounded-full ${
+                                hlsStatus.isComplete ? "bg-emerald-500" : "bg-indigo-500"
+                              }`}
+                              style={{ width: `${Math.min(100, Math.max(0, hlsStatus.percent))}%` }}
+                            />
+                          </div>
+                          {!hlsStatus.isComplete && hlsStatus.cached === 0 ? (
+                            <div className="mt-1 text-[10px] text-slate-500">
+                              Encoding cache in background...
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

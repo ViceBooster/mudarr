@@ -12,7 +12,7 @@ import { getMediaInfo } from "../services/media.js";
 import { recordStreamBandwidth } from "../services/streamMetrics.js";
 import { getStreamToken } from "../services/streams.js";
 import { requireStreamToken } from "../services/streamAuth.js";
-import downloadQueue from "../queue/downloadQueue.js";
+import hlsQueue from "../queue/hlsQueue.js";
 
 const router = Router();
 
@@ -185,6 +185,33 @@ const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): 
   });
 };
 
+const normalizePositiveInt = (value: unknown) => {
+  const parsed = typeof value === "string" ? Number(value) : Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const rounded = Math.floor(parsed);
+  if (rounded < 1) return null;
+  return rounded;
+};
+
+const mapWithConcurrency = async <T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> => {
+  const concurrency = Math.max(1, Math.min(Math.floor(limit) || 1, items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const runNext = async (): Promise<void> => {
+    const index = nextIndex;
+    nextIndex += 1;
+    if (index >= items.length) return;
+    results[index] = await mapper(items[index] as T, index);
+    await runNext();
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => runNext()));
+  return results;
+};
+
 const hlsQueueAddTimeoutMsRaw = Number(process.env.HLS_QUEUE_ADD_TIMEOUT_MS ?? 2000);
 const hlsQueueAddTimeoutMs =
   Number.isFinite(hlsQueueAddTimeoutMsRaw) && hlsQueueAddTimeoutMsRaw > 0
@@ -203,7 +230,7 @@ const clearTrackHlsCache = async (filePath: string, trackId: number) => {
 const queueHlsSegmentJob = async (trackId: number, filePath: string) => {
   try {
     await withTimeout(
-      downloadQueue.add(
+      hlsQueue.add(
         "hls-segment",
         { trackId, filePath },
         { jobId: `hls-segment-${trackId}`, removeOnComplete: true, removeOnFail: 25 }
@@ -2361,14 +2388,72 @@ router.post("/:id/hls/precache", async (req, res) => {
 
   const force = parsed.data.force ?? false;
   if (force) {
-    await Promise.all(filtered.map((item) => clearTrackHlsCache(item.file_path, item.track_id)));
+    const clearConcurrency =
+      normalizePositiveInt(process.env.HLS_PRECACHE_CLEAR_CONCURRENCY) ?? 4;
+    await mapWithConcurrency(filtered, clearConcurrency, async (item) => {
+      await clearTrackHlsCache(item.file_path, item.track_id);
+    });
   }
-  await Promise.all(filtered.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
+
+  const queueConcurrency =
+    normalizePositiveInt(process.env.HLS_PRECACHE_QUEUE_CONCURRENCY) ?? 6;
+  await mapWithConcurrency(filtered, queueConcurrency, async (item) => {
+    await queueHlsSegmentJob(item.track_id, item.file_path);
+  });
 
   res.json({
     streamId: id,
     queued: filtered.length,
     force
+  });
+});
+
+// Return current cached-HLS precache progress for a stream.
+router.get("/:id/hls/precache", async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid stream id" });
+  }
+
+  const stream = await loadStream(id);
+  if (!stream) {
+    return res.status(404).json({ error: "Stream not found" });
+  }
+
+  const items = await loadStreamItems(id);
+  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
+    file_path: string;
+    track_id: number;
+  }>;
+
+  const total = availableItems.length;
+  if (total === 0) {
+    return res.json({
+      streamId: id,
+      total: 0,
+      cached: 0,
+      missing: 0,
+      percent: 0,
+      isComplete: true
+    });
+  }
+
+  const statConcurrency = normalizePositiveInt(process.env.HLS_STATUS_CONCURRENCY) ?? 8;
+  const checks = await mapWithConcurrency(availableItems, statConcurrency, async (item) => {
+    const parsed = await readTrackHlsPlaylist(item.file_path, item.track_id);
+    return Boolean(parsed);
+  });
+
+  const cached = checks.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
+  const missing = Math.max(0, total - cached);
+  const percent = total > 0 ? Math.floor((cached / total) * 100) : 0;
+  res.json({
+    streamId: id,
+    total,
+    cached,
+    missing,
+    percent,
+    isComplete: cached >= total
   });
 });
 

@@ -7,6 +7,7 @@ import type {
   ArtistPreference,
   Genre,
   StreamEncoding,
+  StreamHlsPrecacheStatus,
   StreamSettings,
   StreamStatus,
   StreamSummary,
@@ -95,6 +96,9 @@ export function useStreamsFeature({
   const [selectedStreamTracks, setSelectedStreamTracks] = useState<StreamTrackOption[]>([]);
   const [isCreatingStream, setIsCreatingStream] = useState(false);
   const [expandedStreamIds, setExpandedStreamIds] = useState<number[]>([]);
+  const [streamHlsPrecacheStatus, setStreamHlsPrecacheStatus] = useState<
+    Record<number, StreamHlsPrecacheStatus>
+  >({});
   const [streamMenuId, setStreamMenuId] = useState<number | null>(null);
   const streamMenuRef = useRef<HTMLDivElement>(null);
 
@@ -472,6 +476,41 @@ export function useStreamsFeature({
     );
   };
 
+  const fetchStreamHlsPrecacheStatus = async (streamId: number) => {
+    if (!canUseApi) return;
+    try {
+      const status = await apiGet<StreamHlsPrecacheStatus>(`/api/streams/${streamId}/hls/precache`);
+      setStreamHlsPrecacheStatus((prev) => ({ ...prev, [streamId]: status }));
+    } catch {
+      // ignore background status fetch failures
+    }
+  };
+
+  useEffect(() => {
+    if (!canUseApi) return;
+    if (expandedStreamIds.length === 0) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      await Promise.all(
+        expandedStreamIds.map(async (streamId) => {
+          if (cancelled) return;
+          await fetchStreamHlsPrecacheStatus(streamId);
+        })
+      );
+    };
+
+    void poll();
+    const interval = window.setInterval(() => {
+      void poll();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [apiGet, canUseApi, expandedStreamIds]);
+
   const toggleStreamMenu = (streamId: number) => {
     setStreamMenuId((prev) => (prev === streamId ? null : streamId));
   };
@@ -558,6 +597,7 @@ export function useStreamsFeature({
           force: options?.force ?? true
         }
       );
+      void fetchStreamHlsPrecacheStatus(streamId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to pre-encode HLS cache");
     }
@@ -930,6 +970,7 @@ export function useStreamsFeature({
     // List
     expandedStreamIds,
     toggleStreamExpanded,
+    streamHlsPrecacheStatus,
     streamMenuId,
     setStreamMenuId,
     streamMenuRef,

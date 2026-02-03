@@ -1,6 +1,14 @@
 import React from "react";
 
-import type { Artist, Genre, StreamEncoding, StreamStatus, StreamSummary, StreamTrackOption } from "../../app/types";
+import type {
+  Artist,
+  Genre,
+  StreamEncoding,
+  StreamHlsPrecacheStatus,
+  StreamStatus,
+  StreamSummary,
+  StreamTrackOption
+} from "../../app/types";
 import { StreamCreateCard } from "./StreamCreateCard";
 import { StreamEditModal } from "./StreamEditModal";
 import { StreamConnectionsModal } from "./StreamConnectionsModal";
@@ -69,6 +77,7 @@ type StreamsPageProps = {
   // Existing streams list UI
   expandedStreamIds: number[];
   toggleStreamExpanded: (streamId: number) => void;
+  streamHlsPrecacheStatus: Record<number, StreamHlsPrecacheStatus>;
   streamMenuId: number | null;
   setStreamMenuId: React.Dispatch<React.SetStateAction<number | null>>;
   streamMenuRef: React.RefObject<HTMLDivElement>;
@@ -191,6 +200,7 @@ export const StreamsPage = ({
   createStream,
   expandedStreamIds,
   toggleStreamExpanded,
+  streamHlsPrecacheStatus,
   streamMenuId,
   setStreamMenuId,
   streamMenuRef,
@@ -310,6 +320,7 @@ export const StreamsPage = ({
         streamsLoading={streamsLoading}
         expandedStreamIds={expandedStreamIds}
         toggleStreamExpanded={toggleStreamExpanded}
+        streamHlsPrecacheStatus={streamHlsPrecacheStatus}
         streamMenuId={streamMenuId}
         setStreamMenuId={setStreamMenuId}
         streamMenuRef={streamMenuRef}

@@ -492,6 +492,35 @@ const normalizeConcurrency = (value: unknown) => {
   return Math.min(rounded, 10);
 };
 
+const createConcurrencyLimiter = (limit: number) => {
+  const max = Math.max(1, Math.floor(limit) || 1);
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  const runNext = () => {
+    if (active >= max) return;
+    const next = queue.shift();
+    if (!next) return;
+    active += 1;
+    next();
+  };
+
+  return async <T,>(fn: () => Promise<T>): Promise<T> =>
+    await new Promise<T>((resolve, reject) => {
+      queue.push(() => {
+        fn().then(resolve, reject).finally(() => {
+          active -= 1;
+          runNext();
+        });
+      });
+      runNext();
+    });
+};
+
+const resolveHlsSegmentConcurrency = () =>
+  normalizeConcurrency(process.env.HLS_SEGMENT_CONCURRENCY) ?? 1;
+const hlsSegmentLimiter = createConcurrencyLimiter(resolveHlsSegmentConcurrency());
+
 type SearchSettings = {
   skipNonOfficialMusicVideos: boolean;
 };
@@ -640,11 +669,13 @@ const downloadWorker = new Worker(
         videoId
       ]);
       try {
-        await segmentTrackToHls(trackId, remuxedPath);
-        await pool.query(
-          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-          ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
-        );
+        await hlsSegmentLimiter(async () => {
+          await segmentTrackToHls(trackId, remuxedPath);
+          await pool.query(
+            "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+            ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
+          );
+        });
       } catch (error) {
         console.warn(`Failed to segment HLS for track ${trackId}`, error);
         await pool.query(
@@ -664,15 +695,17 @@ const downloadWorker = new Worker(
       if (!filePath || !fs.existsSync(filePath)) {
         throw new Error("HLS segmenting failed: file not found");
       }
-      await pool.query(
-        "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-        ["hls_segment_started", `Segmenting HLS for track ${trackId}`, { trackId }]
-      );
-      await segmentTrackToHls(trackId, filePath);
-      await pool.query(
-        "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-        ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
-      );
+      await hlsSegmentLimiter(async () => {
+        await pool.query(
+          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+          ["hls_segment_started", `Segmenting HLS for track ${trackId}`, { trackId }]
+        );
+        await segmentTrackToHls(trackId, filePath);
+        await pool.query(
+          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+          ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
+        );
+      });
       return;
     }
 
@@ -1014,18 +1047,23 @@ const downloadWorker = new Worker(
             downloadJobId
           ]);
         }
-        try {
-          await segmentTrackToHls(trackId, resolvedFilePath);
-          await pool.query(
-            "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-            ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
-          );
-        } catch (error) {
-          console.warn(`Failed to segment HLS for track ${trackId}`, error);
-          await pool.query(
-            "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-            ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
-          );
+        const filePathForHls = resolvedFilePath;
+        if (filePathForHls) {
+          try {
+            await hlsSegmentLimiter(async () => {
+              await segmentTrackToHls(trackId, filePathForHls);
+              await pool.query(
+                "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+                ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
+              );
+            });
+          } catch (error) {
+            console.warn(`Failed to segment HLS for track ${trackId}`, error);
+            await pool.query(
+              "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+              ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
+            );
+          }
         }
       }
 
@@ -1064,4 +1102,46 @@ downloadWorker.on("failed", async (job, error) => {
   );
 });
 
+const hlsWorker = new Worker(
+  "hlsQueue",
+  async (job) => {
+    if (job.name !== "hls-segment") {
+      return;
+    }
+    const { trackId, filePath } = job.data as { trackId: number; filePath: string };
+    if (!filePath || !fs.existsSync(filePath)) {
+      await pool.query(
+        "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+        ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
+      );
+      throw new Error("HLS segmenting failed: file not found");
+    }
+
+    await hlsSegmentLimiter(async () => {
+      await pool.query(
+        "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+        ["hls_segment_started", `Segmenting HLS for track ${trackId}`, { trackId }]
+      );
+      try {
+        await segmentTrackToHls(trackId, filePath);
+        await pool.query(
+          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+          ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
+        );
+      } catch (error) {
+        await pool.query(
+          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+          ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
+        );
+        throw error;
+      }
+    });
+  },
+  {
+    connection,
+    concurrency: resolveHlsSegmentConcurrency()
+  }
+);
+
+export { hlsWorker };
 export default downloadWorker;
