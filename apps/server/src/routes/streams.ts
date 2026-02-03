@@ -1105,7 +1105,10 @@ const findNextSegmentIndex = async (dir: string, fallback: number) => {
     const entries = await fsPromises.readdir(dir);
     let maxIndex = fallback - 1;
     for (const entry of entries) {
-      const match = entry.match(/^segment-(\d+)\.m4s$/);
+      // Support both fMP4 (`.m4s`) and MPEG-TS (`.ts`) segment types.
+      // If this doesn't match the current segment type, we may incorrectly restart at 0
+      // on generator restarts, causing playlists to stop advancing for clients.
+      const match = entry.match(/^segment-(\d+)\.(?:m4s|ts)$/);
       if (match) {
         const value = Number(match[1]);
         if (!Number.isNaN(value)) {

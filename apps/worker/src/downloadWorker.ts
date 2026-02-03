@@ -186,6 +186,165 @@ const runFfmpeg = (args: string[]) =>
     });
   });
 
+type FfprobeSummary = {
+  formatName: string | null;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  audioSampleRate: number | null;
+  audioChannels: number | null;
+  pixelFormat: string | null;
+};
+
+const runFfprobeJson = async (filePath: string) => {
+  const args = [
+    "-v",
+    "error",
+    "-show_entries",
+    "format=format_name:stream=codec_type,codec_name,sample_rate,channels,pix_fmt",
+    "-of",
+    "json",
+    filePath
+  ];
+  return await new Promise<any>((resolve, reject) => {
+    const child = spawn("ffprobe", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code) => {
+      if (code === 0) {
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error("ffprobe JSON parse failed"));
+        }
+      } else {
+        reject(new Error(stderr || `ffprobe exited with code ${code}`));
+      }
+    });
+  });
+};
+
+const summarizeProbe = (probe: any): FfprobeSummary => {
+  const formatNameRaw = probe?.format?.format_name;
+  const formatName = typeof formatNameRaw === "string" ? formatNameRaw : null;
+  const streams: any[] = Array.isArray(probe?.streams) ? probe.streams : [];
+  const video = streams.find((s) => s?.codec_type === "video") ?? null;
+  const audio = streams.find((s) => s?.codec_type === "audio") ?? null;
+  const videoCodec = typeof video?.codec_name === "string" ? video.codec_name : null;
+  const pixelFormat = typeof video?.pix_fmt === "string" ? video.pix_fmt : null;
+  const audioCodec = typeof audio?.codec_name === "string" ? audio.codec_name : null;
+  const audioSampleRateRaw =
+    typeof audio?.sample_rate === "string" ? Number(audio.sample_rate) : Number(audio?.sample_rate);
+  const audioSampleRate =
+    Number.isFinite(audioSampleRateRaw) && audioSampleRateRaw > 0 ? Math.floor(audioSampleRateRaw) : null;
+  const audioChannelsRaw = Number(audio?.channels);
+  const audioChannels =
+    Number.isFinite(audioChannelsRaw) && audioChannelsRaw > 0 ? Math.floor(audioChannelsRaw) : null;
+  return { formatName, videoCodec, audioCodec, audioSampleRate, audioChannels, pixelFormat };
+};
+
+const normalizeBoolEnv = (value: string | undefined, defaultValue: boolean) => {
+  if (!value) return defaultValue;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === "1" || trimmed === "true" || trimmed === "yes" || trimmed === "on") return true;
+  if (trimmed === "0" || trimmed === "false" || trimmed === "no" || trimmed === "off") return false;
+  return defaultValue;
+};
+
+const normalizePositiveIntEnv = (value: string | undefined, defaultValue: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  const rounded = Math.floor(parsed);
+  return rounded > 0 ? rounded : defaultValue;
+};
+
+const ensureConcatCopyCompatibleMp4 = async (inputPath: string) => {
+  const ensureCompat = normalizeBoolEnv(process.env.YT_DLP_ENSURE_STREAM_COMPAT, true);
+  if (!ensureCompat) return inputPath;
+
+  const desiredAudioSampleRate = normalizePositiveIntEnv(
+    process.env.YT_DLP_STREAM_AUDIO_SAMPLE_RATE,
+    44100
+  );
+  const desiredAudioChannels = normalizePositiveIntEnv(process.env.YT_DLP_STREAM_AUDIO_CHANNELS, 2);
+  const requireYuv420p = normalizeBoolEnv(process.env.YT_DLP_STREAM_REQUIRE_YUV420P, false);
+
+  let probe: any;
+  try {
+    probe = await runFfprobeJson(inputPath);
+  } catch (error) {
+    console.warn(`ffprobe failed for ${inputPath}; leaving file as-is`, error);
+    return inputPath;
+  }
+  const summary = summarizeProbe(probe);
+  const ext = path.extname(inputPath).toLowerCase();
+  const isMp4Like =
+    ext === ".mp4" ||
+    (typeof summary.formatName === "string" && summary.formatName.toLowerCase().includes("mp4"));
+
+  const videoOk = summary.videoCodec ? summary.videoCodec === "h264" : true;
+  const audioOk = summary.audioCodec ? summary.audioCodec === "aac" : true;
+  const audioParamsOk = summary.audioCodec
+    ? summary.audioSampleRate === desiredAudioSampleRate && summary.audioChannels === desiredAudioChannels
+    : true;
+  const pixFmtOk = requireYuv420p ? (summary.videoCodec ? summary.pixelFormat === "yuv420p" : true) : true;
+
+  if (isMp4Like && videoOk && audioOk && audioParamsOk && pixFmtOk) {
+    return inputPath;
+  }
+
+  const dir = path.dirname(inputPath);
+  const base = path.basename(inputPath, path.extname(inputPath));
+  const tempPath = path.join(dir, `${base}.compat.mp4`);
+  const outputPath = path.join(dir, `${base}.mp4`);
+  await runFfmpeg([
+    "-y",
+    "-i",
+    inputPath,
+    "-map",
+    "0:v?",
+    "-map",
+    "0:a?",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "23",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-ar",
+    String(desiredAudioSampleRate),
+    "-ac",
+    String(desiredAudioChannels),
+    "-movflags",
+    "+faststart",
+    tempPath
+  ]);
+
+  if (fs.existsSync(outputPath) && outputPath !== inputPath) {
+    await fsPromises.unlink(outputPath).catch(() => undefined);
+  }
+  if (fs.existsSync(outputPath) && outputPath === inputPath) {
+    await fsPromises.unlink(outputPath).catch(() => undefined);
+  }
+  await fsPromises.rename(tempPath, outputPath);
+  if (outputPath !== inputPath) {
+    await fsPromises.unlink(inputPath).catch(() => undefined);
+  }
+  return outputPath;
+};
+
 const segmentTrackToHls = async (trackId: number, filePath: string) => {
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error("HLS segmenting failed: file not found");
@@ -747,6 +906,15 @@ const downloadWorker = new Worker(
           }
         }
       }
+
+      // Ensure the stored media is compatible with concat+copy streaming (H.264/AAC MP4),
+      // especially important for TS HLS where we rely on remuxing + bitstream filters.
+      try {
+        resolvedFilePath = await ensureConcatCopyCompatibleMp4(resolvedFilePath);
+      } catch (error) {
+        console.warn(`Failed to normalize ${resolvedFilePath} for stream compatibility`, error);
+      }
+
       if (trackId) {
         const title = trackTitle ?? path.basename(resolvedFilePath);
         const existingVideo = await pool.query("SELECT id FROM videos WHERE track_id = $1", [

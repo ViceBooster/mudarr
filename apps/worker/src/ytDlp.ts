@@ -4,42 +4,45 @@ import fsSync from "node:fs";
 import path from "node:path";
 
 const qualityFormat = (quality?: string | null) => {
-  // Prefer H.264 video and AAC/M4A audio to minimize re-encoding
-  // Format: bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo+bestaudio/best
-  const h264Preference = "[vcodec^=avc1]";
-  const aacPreference = "[acodec^=mp4a]";
+  // Prefer MP4 (H.264/avc1) + M4A (AAC/mp4a) to keep files compatible with concat+copy streaming.
+  // We still include broader fallbacks for edge cases; the worker will normalize incompatible outputs.
+  const h264 = "[vcodec^=avc1]";
+  const aac = "[acodec^=mp4a]";
+  const mp4H264Video = `[ext=mp4]${h264}`;
+  const m4aAacAudio = `[ext=m4a]${aac}`;
+  const mp4H264Aac = `[ext=mp4]${h264}${aac}`;
   
   if (!quality) {
-    return `bestvideo${h264Preference}+bestaudio${aacPreference}/bestvideo+bestaudio/best`;
+    return `bestvideo${mp4H264Video}+bestaudio${m4aAacAudio}/best${mp4H264Aac}/bestvideo${h264}+bestaudio${aac}/best[ext=mp4]/best`;
   }
   if (quality === "144p") {
-    return `bestvideo[height<=144]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=144]+bestaudio/best[height<=144]`;
+    return `bestvideo[height<=144]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=144]${mp4H264Aac}/bestvideo[height<=144]${h264}+bestaudio${aac}/best[height<=144][ext=mp4]/best[height<=144]`;
   }
   if (quality === "240p") {
-    return `bestvideo[height<=240]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=240]+bestaudio/best[height<=240]`;
+    return `bestvideo[height<=240]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=240]${mp4H264Aac}/bestvideo[height<=240]${h264}+bestaudio${aac}/best[height<=240][ext=mp4]/best[height<=240]`;
   }
   if (quality === "360p") {
-    return `bestvideo[height<=360]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=360]+bestaudio/best[height<=360]`;
+    return `bestvideo[height<=360]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=360]${mp4H264Aac}/bestvideo[height<=360]${h264}+bestaudio${aac}/best[height<=360][ext=mp4]/best[height<=360]`;
   }
   if (quality === "480p") {
-    return `bestvideo[height<=480]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=480]+bestaudio/best[height<=480]`;
+    return `bestvideo[height<=480]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=480]${mp4H264Aac}/bestvideo[height<=480]${h264}+bestaudio${aac}/best[height<=480][ext=mp4]/best[height<=480]`;
   }
   if (quality === "720p") {
-    return `bestvideo[height<=720]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=720]+bestaudio/best[height<=720]`;
+    return `bestvideo[height<=720]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=720]${mp4H264Aac}/bestvideo[height<=720]${h264}+bestaudio${aac}/best[height<=720][ext=mp4]/best[height<=720]`;
   }
   if (quality === "1080p") {
-    return `bestvideo[height<=1080]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=1080]+bestaudio/best[height<=1080]`;
+    return `bestvideo[height<=1080]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=1080]${mp4H264Aac}/bestvideo[height<=1080]${h264}+bestaudio${aac}/best[height<=1080][ext=mp4]/best[height<=1080]`;
   }
   if (quality === "1440p") {
-    return `bestvideo[height<=1440]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=1440]+bestaudio/best[height<=1440]`;
+    return `bestvideo[height<=1440]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=1440]${mp4H264Aac}/bestvideo[height<=1440]${h264}+bestaudio${aac}/best[height<=1440][ext=mp4]/best[height<=1440]`;
   }
   if (quality === "2160p") {
-    return `bestvideo[height<=2160]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=2160]+bestaudio/best[height<=2160]`;
+    return `bestvideo[height<=2160]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=2160]${mp4H264Aac}/bestvideo[height<=2160]${h264}+bestaudio${aac}/best[height<=2160][ext=mp4]/best[height<=2160]`;
   }
   if (quality === "4320p") {
-    return `bestvideo[height<=4320]${h264Preference}+bestaudio${aacPreference}/bestvideo[height<=4320]+bestaudio/best[height<=4320]`;
+    return `bestvideo[height<=4320]${mp4H264Video}+bestaudio${m4aAacAudio}/best[height<=4320]${mp4H264Aac}/bestvideo[height<=4320]${h264}+bestaudio${aac}/best[height<=4320][ext=mp4]/best[height<=4320]`;
   }
-  return `bestvideo${h264Preference}+bestaudio${aacPreference}/bestvideo+bestaudio/best`;
+  return `bestvideo${mp4H264Video}+bestaudio${m4aAacAudio}/best${mp4H264Aac}/bestvideo${h264}+bestaudio${aac}/best[ext=mp4]/best`;
 };
 
 const preferOfficialVideoQuery = (query: string) => {
