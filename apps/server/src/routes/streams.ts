@@ -104,7 +104,29 @@ type HlsSession = {
   runner: Promise<void> | null;
 };
 const hlsSessions = new Map<number, HlsSession>();
-const hlsRootDir = path.join(process.env.HLS_TMP_DIR ?? os.tmpdir(), "mudarr-hls");
+const resolveHlsRootDir = () => {
+  const configured = (process.env.HLS_TMP_DIR ?? "").trim();
+  const baseDir = configured || os.tmpdir();
+  return path.join(baseDir, "mudarr-hls");
+};
+let hlsRootDir = resolveHlsRootDir();
+const ensureHlsRootDir = async () => {
+  try {
+    await fsPromises.mkdir(hlsRootDir, { recursive: true });
+    return hlsRootDir;
+  } catch (error) {
+    const fallbackRoot = path.join(os.tmpdir(), "mudarr-hls");
+    if (hlsRootDir === fallbackRoot) {
+      throw error;
+    }
+    console.warn(
+      `HLS tmp dir "${hlsRootDir}" is not available; falling back to "${fallbackRoot}".`
+    );
+    hlsRootDir = fallbackRoot;
+    await fsPromises.mkdir(hlsRootDir, { recursive: true });
+    return hlsRootDir;
+  }
+};
 const hlsSegmentDurationSeconds = 6;
 const hlsPlaylistWindowSeconds = 60;
 const hlsListSize = Math.max(3, Math.ceil(hlsPlaylistWindowSeconds / hlsSegmentDurationSeconds));
@@ -452,7 +474,7 @@ const readStreamPidInfo = async (streamId: number): Promise<StreamPidInfo | null
 };
 
 const writeStreamPidInfo = async (streamId: number, pid: number, dir: string) => {
-  await fsPromises.mkdir(hlsRootDir, { recursive: true });
+  await ensureHlsRootDir();
   const payload: StreamPidInfo = { pid, dir, updatedAt: new Date().toISOString() };
   await fsPromises.writeFile(getStreamPidPath(streamId), JSON.stringify(payload));
 };
@@ -1484,8 +1506,8 @@ const ensureHlsSession = async (
   }
 
   await killOrphanedStreamPid(stream.id);
-  await fsPromises.mkdir(hlsRootDir, { recursive: true });
-  const sessionDir = path.join(hlsRootDir, `stream-${stream.id}`);
+  const rootDir = await ensureHlsRootDir();
+  const sessionDir = path.join(rootDir, `stream-${stream.id}`);
   await fsPromises.rm(sessionDir, { recursive: true, force: true });
   await fsPromises.mkdir(sessionDir, { recursive: true });
 
