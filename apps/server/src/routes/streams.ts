@@ -129,6 +129,40 @@ type TrackHlsPlaylist = {
 const getTrackHlsDir = (filePath: string, trackId: number) =>
   path.join(path.dirname(filePath), hlsCacheDirName, `track-${trackId}`);
 
+const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return promise;
+  }
+  return await new Promise<T>((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+};
+
+const hlsQueueAddTimeoutMsRaw = Number(process.env.HLS_QUEUE_ADD_TIMEOUT_MS ?? 2000);
+const hlsQueueAddTimeoutMs =
+  Number.isFinite(hlsQueueAddTimeoutMsRaw) && hlsQueueAddTimeoutMsRaw > 0
+    ? Math.floor(hlsQueueAddTimeoutMsRaw)
+    : 2000;
+
 const clearTrackHlsCache = async (filePath: string, trackId: number) => {
   const dir = getTrackHlsDir(filePath, trackId);
   try {
@@ -140,10 +174,14 @@ const clearTrackHlsCache = async (filePath: string, trackId: number) => {
 
 const queueHlsSegmentJob = async (trackId: number, filePath: string) => {
   try {
-    await downloadQueue.add(
-      "hls-segment",
-      { trackId, filePath },
-      { jobId: `hls-segment-${trackId}`, removeOnComplete: true, removeOnFail: 25 }
+    await withTimeout(
+      downloadQueue.add(
+        "hls-segment",
+        { trackId, filePath },
+        { jobId: `hls-segment-${trackId}`, removeOnComplete: true, removeOnFail: 25 }
+      ),
+      hlsQueueAddTimeoutMs,
+      `queue hls-segment for track ${trackId}`
     );
   } catch (error) {
     console.warn(`Failed to queue HLS segment job for track ${trackId}`, error);
@@ -1974,13 +2012,12 @@ router.patch("/:id", async (req, res) => {
       track_id: number;
     }>;
     if (availableItems.length > 0) {
-      await Promise.all(
+      // Start live HLS immediately; cache/queue work should not block the stream from starting.
+      await ensureHlsSession(stream, availableItems);
+      void Promise.all(
         availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id))
       );
-      await Promise.all(
-        availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path))
-      );
-      await ensureHlsSession(stream, availableItems);
+      void Promise.all(availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
     }
   }
   const payload = await buildStreamResponse(stream);
@@ -2110,13 +2147,12 @@ router.post("/:id/actions", async (req, res) => {
       console.log(`Stream ${id}: starting HLS with ${availableItems.length} playable items`);
     }
     if (availableItems.length > 0) {
-      await Promise.all(
+      await ensureHlsSession(stream, availableItems);
+      // Cache/queue in the background so Redis slowness doesn't block stream start.
+      void Promise.all(
         availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id))
       );
-      await Promise.all(
-        availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path))
-      );
-      await ensureHlsSession(stream, availableItems);
+      void Promise.all(availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
     }
   }
   const payload = await buildStreamResponse(stream);
@@ -2184,13 +2220,9 @@ router.post("/:id/rescan", async (req, res) => {
     track_id: number;
   }>;
   if (availableItems.length > 0) {
-    await Promise.all(
-      availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id))
-    );
-    await Promise.all(
-      availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path))
-    );
     await ensureHlsSession(stream, availableItems);
+    void Promise.all(availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id)));
+    void Promise.all(availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
   }
   const payload = await buildStreamResponse(stream);
   res.json(payload);
