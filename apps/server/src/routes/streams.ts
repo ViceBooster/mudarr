@@ -1020,6 +1020,11 @@ const hlsSweepIntervalMs =
   Number.isFinite(hlsSweepIntervalMsRaw) && hlsSweepIntervalMsRaw > 0
     ? hlsSweepIntervalMsRaw
     : 15_000;
+const hlsLiveReadyTimeoutMsRaw = Number(process.env.HLS_LIVE_READY_TIMEOUT_MS ?? 20_000);
+const hlsLiveReadyTimeoutMs =
+  Number.isFinite(hlsLiveReadyTimeoutMsRaw) && hlsLiveReadyTimeoutMsRaw > 0
+    ? Math.floor(hlsLiveReadyTimeoutMsRaw)
+    : 20_000;
 
 // Prevent orphaned/idle stream generators from running forever.
 // Any request to the HLS session playlist/segments refreshes `lastAccess`.
@@ -2040,7 +2045,9 @@ router.post("/:id/actions", async (req, res) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
   const action = parsed.data.action;
-  console.log(`Stream ${id}: action ${action}`);
+  const ip = getClientIp(req);
+  const userAgent = getClientUserAgent(req);
+  console.log(`Stream ${id}: action ${action} (ip=${ip}, ua=${userAgent ?? "unknown"})`);
   const updates: string[] = [];
   const params: unknown[] = [];
   if (action === "start") {
@@ -2087,6 +2094,21 @@ router.post("/:id/actions", async (req, res) => {
       artist_name: string | null;
       track_id: number;
     }>;
+    if (items.length === 0) {
+      console.warn(`Stream ${id}: started but has 0 stream_items (no media to play)`);
+    } else if (availableItems.length === 0) {
+      const sample = items
+        .map((item) => item.file_path)
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .slice(0, 3);
+      console.warn(
+        `Stream ${id}: started but has no usable media files. ` +
+          `This usually means missing volume mounts or stale file paths. ` +
+          `Example file_path values: ${JSON.stringify(sample)}`
+      );
+    } else {
+      console.log(`Stream ${id}: starting HLS with ${availableItems.length} playable items`);
+    }
     if (availableItems.length > 0) {
       await Promise.all(
         availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id))
@@ -2328,8 +2350,14 @@ router.get("/:id/hls/live.m3u8", async (req, res) => {
 
   const session = await ensureHlsSession(stream, availableItems);
   session.lastAccess = Date.now();
-  const ready = await waitForHlsPlaylistReady(session.dir, 8000, 1);
+  const ready = await waitForHlsPlaylistReady(session.dir, hlsLiveReadyTimeoutMs, 1);
   if (!ready) {
+    const pid = session.currentProcess?.pid;
+    const uptime = getFfmpegUptimeSeconds(id);
+    console.warn(
+      `Stream ${id}: HLS session not ready after ${hlsLiveReadyTimeoutMs}ms ` +
+        `(pid=${typeof pid === "number" ? pid : "none"}, uptime=${uptime ?? "n/a"}s, dir=${session.dir})`
+    );
     return res.status(503).json({ error: "HLS session not ready" });
   }
 
