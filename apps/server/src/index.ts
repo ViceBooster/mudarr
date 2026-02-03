@@ -15,7 +15,14 @@ if (trustProxyRaw === "1" || trustProxyRaw === "true" || trustProxyRaw === "yes"
   app.set("trust proxy", true);
 }
 
-app.use(cors());
+app.use(
+  cors({
+    origin: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Authorization", "Content-Type"],
+    maxAge: 86_400
+  })
+);
 app.use(express.json());
 
 app.get("/health", (_req, res) => {

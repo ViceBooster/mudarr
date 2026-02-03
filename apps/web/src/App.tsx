@@ -291,6 +291,7 @@ export default function App() {
   const updateCheckTriggered = useRef(false);
   const importJobsInFlight = useRef(false);
   const hasActiveImportJobsRef = useRef(false);
+  const lastImportJobsFetchAt = useRef(0);
 
   const setupComplete = setupStatus === "complete";
   const canUseApi = setupComplete && authStatus === "authenticated";
@@ -793,8 +794,22 @@ export default function App() {
 
   const loadArtistImportJobs = useCallback(async () => {
     if (!canUseApi) return;
+    // Hard throttle: even if multiple pollers exist (HMR/duplicate mounts),
+    // never hit this endpoint more often than every 10s.
+    const minIntervalMs = 10_000;
+    const now = Date.now();
+    const w = window as unknown as Record<string, unknown>;
+    const globalLast = typeof w.__mudarrImportJobsLastFetchAt === "number" ? (w.__mudarrImportJobsLastFetchAt as number) : 0;
+    const globalInFlight = w.__mudarrImportJobsInFlight === true;
+    const last = Math.max(lastImportJobsFetchAt.current, globalLast);
+    if (globalInFlight) return;
+    if (now - last < minIntervalMs) return;
     if (importJobsInFlight.current) return;
+
     importJobsInFlight.current = true;
+    w.__mudarrImportJobsInFlight = true;
+    lastImportJobsFetchAt.current = now;
+    w.__mudarrImportJobsLastFetchAt = now;
     try {
       const jobs = await apiGet<ArtistImportJob[]>("/api/artists/imports/active");
       
@@ -831,6 +846,7 @@ export default function App() {
       console.error("Failed to load import jobs:", err);
     } finally {
       importJobsInFlight.current = false;
+      w.__mudarrImportJobsInFlight = false;
     }
   }, [apiGet, canUseApi, isArtistDetailRoute, artistRouteId, activeTab, loadArtistDetail, loadArtistsOnly, loadDashboardStats]);
 
@@ -923,7 +939,7 @@ export default function App() {
     const scheduleNext = () => {
       if (cancelled) return;
       const hasActiveImportJobs = hasActiveImportJobsRef.current;
-      const intervalMs = isLogsPage || hasActiveImportJobs ? 5000 : 30000;
+      const intervalMs = isLogsPage || hasActiveImportJobs ? 10000 : 30000;
       timeoutId = window.setTimeout(() => {
         void loadArtistImportJobs().finally(() => {
           scheduleNext();
