@@ -14,16 +14,41 @@ export function useDownloadsPolling({
   // Poll downloads - fast when active, slow when idle
   const downloadsIntervalRef = useRef<number | null>(null);
   const lastDownloadPollMode = useRef<"fast" | "slow" | null>(null);
+  const downloadsInFlight = useRef(false);
+  const artistsInFlight = useRef(false);
+  const lastArtistsPollAt = useRef(0);
+
+  const shouldPollArtists = (hasActiveDownloads: boolean) => {
+    if (pathname === "/artists") return true;
+    return hasActiveDownloads;
+  };
 
   useEffect(() => {
     const hasActiveDownloads = activeDownloadCount > 0;
     const shouldPollFast = hasActiveDownloads || pathname === "/downloads";
     const currentMode = shouldPollFast ? "fast" : "slow";
+    const artistsPollIntervalMs = pathname === "/artists" ? 5000 : 10000;
 
-    const pollDownloads = () => {
-      void loadDownloadsOnly();
-      if (hasActiveDownloads) {
-        void loadArtistsOnly();
+    const pollDownloads = async () => {
+      if (!downloadsInFlight.current) {
+        downloadsInFlight.current = true;
+        try {
+          await loadDownloadsOnly();
+        } finally {
+          downloadsInFlight.current = false;
+        }
+      }
+      if (shouldPollArtists(hasActiveDownloads)) {
+        const now = Date.now();
+        if (now - lastArtistsPollAt.current >= artistsPollIntervalMs && !artistsInFlight.current) {
+          artistsInFlight.current = true;
+          lastArtistsPollAt.current = now;
+          try {
+            await loadArtistsOnly();
+          } finally {
+            artistsInFlight.current = false;
+          }
+        }
       }
     };
 
@@ -34,11 +59,11 @@ export function useDownloadsPolling({
       }
       const intervalMs = shouldPollFast ? 2000 : 15000;
       downloadsIntervalRef.current = window.setInterval(() => {
-        pollDownloads();
+        void pollDownloads();
       }, intervalMs);
       lastDownloadPollMode.current = currentMode;
     }
-    pollDownloads();
+    void pollDownloads();
 
     return () => {
       if (downloadsIntervalRef.current !== null) {

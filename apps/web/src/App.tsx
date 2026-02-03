@@ -213,6 +213,18 @@ export default function App() {
   const [bulkAutoDownload, setBulkAutoDownload] = useState(true);
   const [selectedAlbumIds, setSelectedAlbumIds] = useState<number[]>([]);
   const [monitorNotice, setMonitorNotice] = useState<string | null>(null);
+  const loadArtistDetail = useCallback(async (artistId: number) => {
+    const [detail, prefs] = await Promise.all([
+      apiGet<ArtistDetail>(`/api/artists/${artistId}`),
+      apiGet<ArtistPreference>(`/api/artists/${artistId}/preferences`)
+    ]);
+    setSelectedArtistId(artistId);
+    setArtistDetail(detail);
+    setArtistPreferences(prefs);
+    setImportMode(prefs.import_mode);
+    setImportQuality(prefs.quality);
+    setImportAutoDownload(prefs.auto_download);
+  }, [apiGet]);
   const {
     youtubeSearchContext,
     youtubeSearchQuery,
@@ -277,6 +289,7 @@ export default function App() {
   const previousImportJobIds = useRef<Set<number>>(new Set());
   const recentImportJobIds = useRef<Set<number>>(new Set());
   const updateCheckTriggered = useRef(false);
+  const importJobsInFlight = useRef(false);
 
   const setupComplete = setupStatus === "complete";
   const canUseApi = setupComplete && authStatus === "authenticated";
@@ -746,7 +759,7 @@ export default function App() {
     }
   }, [apiGet, canUseApi]);
 
-  const loadDashboardStats = async () => {
+  const loadDashboardStats = useCallback(async () => {
     if (!canUseApi) return;
     try {
       const stats = await apiGet<DashboardStats>("/api/stats");
@@ -755,7 +768,7 @@ export default function App() {
       setDashboardStats(null);
       setError(err instanceof Error ? err.message : "Failed to load dashboard stats");
     }
-  };
+  }, [apiGet, canUseApi]);
 
   const loadStreamingStatsHistory = async () => {
     if (!canUseApi) return;
@@ -777,8 +790,10 @@ export default function App() {
     }
   }, [apiGet, canUseApi]);
 
-  const loadArtistImportJobs = async () => {
+  const loadArtistImportJobs = useCallback(async () => {
     if (!canUseApi) return;
+    if (importJobsInFlight.current) return;
+    importJobsInFlight.current = true;
     try {
       const jobs = await apiGet<ArtistImportJob[]>("/api/artists/imports/active");
       
@@ -813,8 +828,10 @@ export default function App() {
     } catch (err) {
       // Silent fail - not critical
       console.error("Failed to load import jobs:", err);
+    } finally {
+      importJobsInFlight.current = false;
     }
-  };
+  }, [apiGet, canUseApi, isArtistDetailRoute, artistRouteId, activeTab, loadArtistDetail, loadArtistsOnly, loadDashboardStats]);
 
   const changeTab = (tab: (typeof tabs)[number]) => {
     navigate(tabRoutes[tab]);
@@ -892,15 +909,19 @@ export default function App() {
 
   useEffect(() => {
     if (!canUseApi) return;
-    // Poll artist import jobs every 3 seconds
+    const isLogsPage = location.pathname === "/logs";
+    const hasActiveImportJobs = artistImportJobs.some(
+      (job) => job.status === "pending" || job.status === "processing"
+    );
+    const intervalMs = isLogsPage || hasActiveImportJobs ? 5000 : 30000;
     void loadArtistImportJobs();
     const interval = window.setInterval(() => {
       void loadArtistImportJobs();
-    }, 3000);
+    }, intervalMs);
     return () => {
       window.clearInterval(interval);
     };
-  }, [canUseApi]);
+  }, [canUseApi, location.pathname, artistImportJobs, loadArtistImportJobs]);
 
   const artistHasDownloads = useMemo(() => {
     if (!artistDetail) {
@@ -934,19 +955,6 @@ export default function App() {
     }
     return buildDownloadProgress(downloaded, monitored);
   }, [artistDetail]);
-
-  async function loadArtistDetail(artistId: number) {
-    const [detail, prefs] = await Promise.all([
-      apiGet<ArtistDetail>(`/api/artists/${artistId}`),
-      apiGet<ArtistPreference>(`/api/artists/${artistId}/preferences`)
-    ]);
-    setSelectedArtistId(artistId);
-    setArtistDetail(detail);
-    setArtistPreferences(prefs);
-    setImportMode(prefs.import_mode);
-    setImportQuality(prefs.quality);
-    setImportAutoDownload(prefs.auto_download);
-  }
 
   const openArtistPage = async (artistId: number) => {
     navigate(`/artists/${artistId}`);
