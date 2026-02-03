@@ -290,6 +290,7 @@ export default function App() {
   const recentImportJobIds = useRef<Set<number>>(new Set());
   const updateCheckTriggered = useRef(false);
   const importJobsInFlight = useRef(false);
+  const hasActiveImportJobsRef = useRef(false);
 
   const setupComplete = setupStatus === "complete";
   const canUseApi = setupComplete && authStatus === "authenticated";
@@ -908,20 +909,39 @@ export default function App() {
   }, [canUseApi]);
 
   useEffect(() => {
-    if (!canUseApi) return;
-    const isLogsPage = location.pathname === "/logs";
-    const hasActiveImportJobs = artistImportJobs.some(
+    hasActiveImportJobsRef.current = artistImportJobs.some(
       (job) => job.status === "pending" || job.status === "processing"
     );
-    const intervalMs = isLogsPage || hasActiveImportJobs ? 5000 : 30000;
-    void loadArtistImportJobs();
-    const interval = window.setInterval(() => {
-      void loadArtistImportJobs();
-    }, intervalMs);
-    return () => {
-      window.clearInterval(interval);
+  }, [artistImportJobs]);
+
+  useEffect(() => {
+    if (!canUseApi) return;
+    const isLogsPage = location.pathname === "/logs";
+    let timeoutId: number | null = null;
+    let cancelled = false;
+
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const hasActiveImportJobs = hasActiveImportJobsRef.current;
+      const intervalMs = isLogsPage || hasActiveImportJobs ? 5000 : 30000;
+      timeoutId = window.setTimeout(() => {
+        void loadArtistImportJobs().finally(() => {
+          scheduleNext();
+        });
+      }, intervalMs);
     };
-  }, [canUseApi, location.pathname, artistImportJobs, loadArtistImportJobs]);
+
+    void loadArtistImportJobs().finally(() => {
+      scheduleNext();
+    });
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [canUseApi, location.pathname, loadArtistImportJobs]);
 
   const artistHasDownloads = useMemo(() => {
     if (!artistDetail) {

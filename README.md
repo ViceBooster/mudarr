@@ -2,11 +2,9 @@
 
 # Mudarr
 
-A self-hosted Radarr/Sonarr inspired automated music video management/grabber application.
+A self-hosted Radarr/Sonarr inspired automated music video management/grabber/streamer application.
 
-## UI examples
-
-### Dashboard
+## Dashboard View
 
 ![Dashboard](apps/web/public/readme_preview.jpg)
 
@@ -261,3 +259,14 @@ Set `VITE_API_URL=https://api.mudarr.example.com`, and set the public base URL i
 ## Integrations
 
 Plex, Spotify, and Last.fm are optional and can be enabled via `.env` and the Settings UI.
+
+## License
+
+Mudarr is open source under the GNU Affero General Public License v3.0.
+See `LICENSE` for the full text and `THIRD_PARTY_NOTICES.md` for attributions.
+
+## Legal
+
+You are responsible for how you use this software and for complying with
+applicable laws and content rights. The authors and contributors are not
+responsible for any unauthorized or unlawful use.
