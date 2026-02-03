@@ -84,6 +84,7 @@ export function useStreamsFeature({
   const [streamSource, setStreamSource] = useState<StreamSource>("manual");
   const [streamShuffle, setStreamShuffle] = useState(false);
   const [streamEncoding, setStreamEncoding] = useState<StreamEncoding>("original");
+  const [streamPrecacheHls, setStreamPrecacheHls] = useState(true);
   const [streamArtistQuery, setStreamArtistQuery] = useState("");
   const [streamGenreQuery, setStreamGenreQuery] = useState("");
   const [streamArtistIds, setStreamArtistIds] = useState<number[]>([]);
@@ -104,6 +105,7 @@ export function useStreamsFeature({
   const [editingStreamShuffle, setEditingStreamShuffle] = useState(false);
   const [editingStreamStatus, setEditingStreamStatus] = useState<StreamStatus>("active");
   const [editingStreamRestartOnSave, setEditingStreamRestartOnSave] = useState(true);
+  const [editingStreamPrecacheHls, setEditingStreamPrecacheHls] = useState(false);
   const [editingStreamTab, setEditingStreamTab] = useState<"artists" | "tracks">("artists");
   const [editingStreamTracks, setEditingStreamTracks] = useState<StreamTrackOption[]>([]);
   const [editingStreamSelectedIds, setEditingStreamSelectedIds] = useState<number[]>([]);
@@ -546,6 +548,21 @@ export function useStreamsFeature({
     window.URL.revokeObjectURL(url);
   };
 
+  const precacheStreamHls = async (streamId: number, options?: { force?: boolean }) => {
+    if (!canUseApi) return;
+    setError(null);
+    try {
+      await apiPost<{ streamId: number; queued: number; force: boolean }>(
+        `/api/streams/${streamId}/hls/precache`,
+        {
+          force: options?.force ?? true
+        }
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to pre-encode HLS cache");
+    }
+  };
+
   const createStream = async () => {
     const trimmedName = streamName.trim();
     if (!trimmedName) {
@@ -596,13 +613,18 @@ export function useStreamsFeature({
         payload.genreIds = streamGenreIds;
       }
 
-      await apiPost<StreamSummary>("/api/streams", {
+      const created = await apiPost<StreamSummary>("/api/streams", {
         ...payload
       });
+      if (streamPrecacheHls) {
+        // Run in the background; it can take a while on large streams.
+        void precacheStreamHls(created.id, { force: true });
+      }
       setStreamName("");
       setStreamIcon("");
       setStreamShuffle(false);
       setStreamEncoding("original");
+      setStreamPrecacheHls(true);
       setStreamArtistIds([]);
       setStreamGenreIds([]);
       setStreamArtistQuery("");
@@ -627,6 +649,7 @@ export function useStreamsFeature({
     setEditingStreamShuffle(stream.shuffle);
     setEditingStreamStatus(stream.status);
     setEditingStreamRestartOnSave(stream.status === "active");
+    setEditingStreamPrecacheHls(false);
     const artistIds = new Set<number>();
     for (const item of stream.items) {
       if (!item.artist_name) continue;
@@ -662,6 +685,7 @@ export function useStreamsFeature({
     setEditingStreamShuffle(false);
     setEditingStreamStatus("active");
     setEditingStreamRestartOnSave(true);
+    setEditingStreamPrecacheHls(false);
     setEditingStreamTab("artists");
     setEditingStreamTracks([]);
     setEditingStreamSelectedIds([]);
@@ -718,6 +742,9 @@ export function useStreamsFeature({
         setError(message);
       }
     }
+    if (editingStreamPrecacheHls) {
+      void precacheStreamHls(streamId, { force: true });
+    }
     await loadStreams();
     cancelEditStream();
   };
@@ -745,6 +772,9 @@ export function useStreamsFeature({
       const result = await apiPost<StreamSummary>(`/api/streams/${streamId}/rescan`, payload);
       updateEditingStreamTracks(result);
       await loadStreams();
+      if (editingStreamId === streamId && editingStreamPrecacheHls) {
+        void precacheStreamHls(streamId, { force: true });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to rescan stream");
     } finally {
@@ -872,6 +902,8 @@ export function useStreamsFeature({
     setStreamEncoding,
     streamShuffle,
     setStreamShuffle,
+    streamPrecacheHls,
+    setStreamPrecacheHls,
     streamSource,
     setStreamSource,
     streamTrackQuery,
@@ -926,6 +958,8 @@ export function useStreamsFeature({
     setEditingStreamShuffle,
     editingStreamRestartOnSave,
     setEditingStreamRestartOnSave,
+    editingStreamPrecacheHls,
+    setEditingStreamPrecacheHls,
     editingStreamStatus,
     setEditingStreamStatus,
     editingStreamTab,
@@ -950,6 +984,7 @@ export function useStreamsFeature({
     removeEditingStreamTrack,
     rescanEditingStream,
     saveStreamEdits,
+    precacheStreamHls,
     connectionsModalStream,
 
     // Player

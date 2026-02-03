@@ -350,16 +350,33 @@ const segmentTrackToHls = async (trackId: number, filePath: string) => {
     throw new Error("HLS segmenting failed: file not found");
   }
   const outputDir = buildTrackHlsDir(filePath, trackId);
-  await fsPromises.rm(outputDir, { recursive: true, force: true });
-  await fsPromises.mkdir(outputDir, { recursive: true });
-  await runFfmpeg([
+  const playlistPath = path.join(outputDir, "playlist.m3u8");
+
+  const probe = await runFfprobeJson(filePath);
+  const summary = summarizeProbe(probe);
+  const hasVideo = Boolean(summary.videoCodec);
+  const hasAudio = Boolean(summary.audioCodec);
+  if (!hasVideo && !hasAudio) {
+    throw new Error("HLS segmenting failed: no audio/video streams detected");
+  }
+
+  const commonArgs = [
     "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-fflags",
+    "+genpts+discardcorrupt",
+    "-err_detect",
+    "ignore_err",
+    "-avoid_negative_ts",
+    "make_zero",
     "-i",
     filePath,
-    "-c",
-    "copy",
     "-map",
-    "0",
+    "0:v?",
+    "-map",
+    "0:a?",
     "-f",
     "hls",
     "-hls_time",
@@ -374,8 +391,65 @@ const segmentTrackToHls = async (trackId: number, filePath: string) => {
     "independent_segments+program_date_time+temp_file",
     "-hls_playlist_type",
     "vod",
-    path.join(outputDir, "playlist.m3u8")
-  ]);
+    playlistPath
+  ];
+
+  const ensureOutputDir = async () => {
+    await fsPromises.rm(outputDir, { recursive: true, force: true });
+    await fsPromises.mkdir(outputDir, { recursive: true });
+  };
+
+  // Attempt 1: stream copy (fastest).
+  try {
+    await ensureOutputDir();
+    const copyArgs = [
+      ...commonArgs,
+      "-c",
+      "copy"
+    ];
+    // When writing MPEG-TS segments, H.264 from MP4 often needs AnnexB.
+    if (hasVideo && summary.videoCodec === "h264") {
+      copyArgs.push("-bsf:v", "h264_mp4toannexb,dump_extra");
+    }
+    await runFfmpeg(copyArgs);
+    return;
+  } catch (error) {
+    console.warn(`HLS copy segmenting failed for track ${trackId}; falling back to transcode`, error);
+  }
+
+  // Attempt 2: transcode to a consistent H.264/AAC profile for maximum compatibility.
+  await ensureOutputDir();
+  const transcodeArgs = [
+    ...commonArgs
+  ];
+  if (hasVideo) {
+    transcodeArgs.push(
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      // Improve segment boundary stability
+      "-force_key_frames",
+      `expr:gte(t,n_forced*${hlsSegmentDurationSeconds})`,
+      "-sc_threshold",
+      "0"
+    );
+  }
+  if (hasAudio) {
+    transcodeArgs.push("-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2");
+  }
+  // If one of the streams is absent, make sure we don't accidentally copy it.
+  if (!hasVideo) {
+    transcodeArgs.push("-vn");
+  }
+  if (!hasAudio) {
+    transcodeArgs.push("-an");
+  }
+  await runFfmpeg(transcodeArgs);
 };
 
 const remuxToMp4 = async (inputPath: string) => {

@@ -21,6 +21,8 @@ type StreamCreateCardProps<TEncoding extends string, TTrack extends StreamTrack>
   setStreamEncoding: React.Dispatch<React.SetStateAction<TEncoding>>;
   streamShuffle: boolean;
   setStreamShuffle: React.Dispatch<React.SetStateAction<boolean>>;
+  streamPrecacheHls: boolean;
+  setStreamPrecacheHls: React.Dispatch<React.SetStateAction<boolean>>;
 
   streamSource: StreamSource;
   setStreamSource: React.Dispatch<React.SetStateAction<StreamSource>>;
@@ -60,6 +62,8 @@ export function StreamCreateCard<TEncoding extends string, TTrack extends Stream
   setStreamEncoding,
   streamShuffle,
   setStreamShuffle,
+  streamPrecacheHls,
+  setStreamPrecacheHls,
   streamSource,
   setStreamSource,
   streamTrackQuery,
@@ -123,6 +127,21 @@ export function StreamCreateCard<TEncoding extends string, TTrack extends Stream
             Shuffle on play
           </label>
         </div>
+
+        <label className="flex items-start gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-700">
+          <input
+            type="checkbox"
+            checked={streamPrecacheHls}
+            onChange={(event) => setStreamPrecacheHls(event.currentTarget.checked)}
+            className="mt-0.5 h-4 w-4"
+          />
+          <span className="space-y-0.5">
+            <span className="block font-semibold">Pre-encode for HLS Cached (recommended)</span>
+            <span className="block text-[10px] text-slate-500">
+              Queues background jobs to segment/transcode the stream’s tracks for smoother playback via the “HLS Cached” URL.
+            </span>
+          </span>
+        </label>
 
         <div className="flex flex-wrap gap-2 text-xs">
           <button

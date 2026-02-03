@@ -47,6 +47,11 @@ const rescanStreamSchema = z.object({
   artistIds: z.array(z.number().int()).optional()
 });
 
+const precacheStreamHlsSchema = z.object({
+  force: z.boolean().optional(),
+  trackIds: z.array(z.number().int()).optional()
+});
+
 const streamActionSchema = z.object({
   action: z.enum(["start", "stop", "reboot"])
 });
@@ -2320,6 +2325,51 @@ router.post("/:id/rescan", async (req, res) => {
   }
   const payload = await buildStreamResponse(stream);
   res.json(payload);
+});
+
+// Queue (and optionally force re-run) per-track HLS segmentation for a stream.
+// This is intended for the "cached" HLS playlist flow (/:id/hls/playlist.m3u8).
+router.post("/:id/hls/precache", async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid stream id" });
+  }
+  const parsed = precacheStreamHlsSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const stream = await loadStream(id);
+  if (!stream) {
+    return res.status(404).json({ error: "Stream not found" });
+  }
+
+  const items = await loadStreamItems(id);
+  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
+    file_path: string;
+    artist_name: string | null;
+    track_id: number;
+  }>;
+  if (availableItems.length === 0) {
+    return res.status(404).json({ error: "No playable tracks in this stream" });
+  }
+
+  const trackFilter = parsed.data.trackIds ? new Set(parsed.data.trackIds) : null;
+  const filtered = trackFilter
+    ? availableItems.filter((item) => trackFilter.has(item.track_id))
+    : availableItems;
+
+  const force = parsed.data.force ?? false;
+  if (force) {
+    await Promise.all(filtered.map((item) => clearTrackHlsCache(item.file_path, item.track_id)));
+  }
+  await Promise.all(filtered.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
+
+  res.json({
+    streamId: id,
+    queued: filtered.length,
+    force
+  });
 });
 
 router.delete("/:id", async (req, res) => {

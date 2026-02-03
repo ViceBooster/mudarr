@@ -102,6 +102,7 @@ type StreamsListProps<
   openStreamPlayer: (streamId: number) => void;
   runStreamAction: (streamId: number, action: StreamAction) => void | Promise<unknown>;
   rescanStream: (streamId: number) => void | Promise<unknown>;
+  precacheStreamHls: (streamId: number) => void | Promise<unknown>;
   deleteStream: (streamId: number, streamName: string) => void;
 
   setConnectionsModalStreamId: React.Dispatch<React.SetStateAction<number | null>>;
@@ -133,6 +134,7 @@ export function StreamsList<
   openStreamPlayer,
   runStreamAction,
   rescanStream,
+  precacheStreamHls,
   deleteStream,
   setConnectionsModalStreamId
 }: StreamsListProps<TClient, TItem, TStream>) {
@@ -307,6 +309,16 @@ export function StreamsList<
                         >
                           <SearchIcon />
                           {isRescanning ? "Rescanning..." : "Rescan tracks"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setStreamMenuId(null);
+                            void precacheStreamHls(stream.id);
+                          }}
+                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          <DownloadIcon />
+                          Pre-encode HLS cached
                         </button>
                         <button
                           onClick={() => {
