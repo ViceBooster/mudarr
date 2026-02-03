@@ -83,6 +83,7 @@ type StreamsListProps<
   expandedStreamIds: number[];
   toggleStreamExpanded: (streamId: number) => void;
   streamHlsPrecacheStatus: Record<number, StreamHlsPrecacheStatus>;
+  cancellingStreamHlsPrecacheIds: number[];
 
   streamMenuId: number | null;
   setStreamMenuId: React.Dispatch<React.SetStateAction<number | null>>;
@@ -105,6 +106,7 @@ type StreamsListProps<
   runStreamAction: (streamId: number, action: StreamAction) => void | Promise<unknown>;
   rescanStream: (streamId: number) => void | Promise<unknown>;
   precacheStreamHls: (streamId: number) => void | Promise<unknown>;
+  cancelStreamHlsPrecache: (streamId: number) => void | Promise<unknown>;
   deleteStream: (streamId: number, streamName: string) => void;
 
   setConnectionsModalStreamId: React.Dispatch<React.SetStateAction<number | null>>;
@@ -121,6 +123,7 @@ export function StreamsList<
   expandedStreamIds,
   toggleStreamExpanded,
   streamHlsPrecacheStatus,
+  cancellingStreamHlsPrecacheIds,
   streamMenuId,
   setStreamMenuId,
   streamMenuRef,
@@ -138,6 +141,7 @@ export function StreamsList<
   runStreamAction,
   rescanStream,
   precacheStreamHls,
+  cancelStreamHlsPrecache,
   deleteStream,
   setConnectionsModalStreamId
 }: StreamsListProps<TClient, TItem, TStream>) {
@@ -154,6 +158,7 @@ export function StreamsList<
           const cachedUrl = streamCachedUrl(stream.id);
           const shareUrl = shareableStreamUrl(stream.id);
           const hlsStatus = streamHlsPrecacheStatus[stream.id];
+          const isCancellingHls = cancellingStreamHlsPrecacheIds.includes(stream.id);
           const isEditing = editingStreamId === stream.id;
           const resolutionSummary = getResolutionSummary(stream.items);
           const isRestarting = restartingStreamIds.includes(stream.id);
@@ -414,9 +419,20 @@ export function StreamsList<
                               style={{ width: `${Math.min(100, Math.max(0, hlsStatus.percent))}%` }}
                             />
                           </div>
-                          {!hlsStatus.isComplete && hlsStatus.cached === 0 ? (
-                            <div className="mt-1 text-[10px] text-slate-500">
-                              Encoding cache in background...
+                          {!hlsStatus.isComplete ? (
+                            <div className="mt-2 flex items-center justify-between gap-2">
+                              <div className="text-[10px] text-slate-500">
+                                {isCancellingHls ? "Cancelling..." : "Encoding cache in background."}
+                              </div>
+                              <button
+                                onClick={() => void cancelStreamHlsPrecache(stream.id)}
+                                disabled={isCancellingHls}
+                                className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                title="Cancel HLS cache encoding"
+                              >
+                                <StopIcon />
+                                Cancel
+                              </button>
                             </div>
                           ) : null}
                         </div>

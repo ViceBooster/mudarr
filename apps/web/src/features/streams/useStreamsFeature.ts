@@ -99,6 +99,7 @@ export function useStreamsFeature({
   const [streamHlsPrecacheStatus, setStreamHlsPrecacheStatus] = useState<
     Record<number, StreamHlsPrecacheStatus>
   >({});
+  const [cancellingStreamHlsPrecacheIds, setCancellingStreamHlsPrecacheIds] = useState<number[]>([]);
   const [streamMenuId, setStreamMenuId] = useState<number | null>(null);
   const streamMenuRef = useRef<HTMLDivElement>(null);
 
@@ -603,6 +604,24 @@ export function useStreamsFeature({
     }
   };
 
+  const cancelStreamHlsPrecache = async (streamId: number, options?: { abortActive?: boolean }) => {
+    if (!canUseApi) return;
+    if (cancellingStreamHlsPrecacheIds.includes(streamId)) return;
+    setCancellingStreamHlsPrecacheIds((prev) => [...prev, streamId]);
+    setError(null);
+    try {
+      await apiPost<{ streamId: number; tracks: number; removed: number; abortActive: boolean }>(
+        `/api/streams/${streamId}/hls/precache/cancel`,
+        { abortActive: options?.abortActive ?? true }
+      );
+      void fetchStreamHlsPrecacheStatus(streamId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel HLS cache encoding");
+    } finally {
+      setCancellingStreamHlsPrecacheIds((prev) => prev.filter((id) => id !== streamId));
+    }
+  };
+
   const createStream = async () => {
     const trimmedName = streamName.trim();
     if (!trimmedName) {
@@ -971,6 +990,7 @@ export function useStreamsFeature({
     expandedStreamIds,
     toggleStreamExpanded,
     streamHlsPrecacheStatus,
+    cancellingStreamHlsPrecacheIds,
     streamMenuId,
     setStreamMenuId,
     streamMenuRef,
@@ -987,6 +1007,7 @@ export function useStreamsFeature({
     shareableStreamUrl,
     runStreamAction,
     rescanStream,
+    cancelStreamHlsPrecache,
     deleteStream,
     setConnectionsModalStreamId,
     editingStreamName,

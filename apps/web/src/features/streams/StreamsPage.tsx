@@ -78,6 +78,7 @@ type StreamsPageProps = {
   expandedStreamIds: number[];
   toggleStreamExpanded: (streamId: number) => void;
   streamHlsPrecacheStatus: Record<number, StreamHlsPrecacheStatus>;
+  cancellingStreamHlsPrecacheIds: number[];
   streamMenuId: number | null;
   setStreamMenuId: React.Dispatch<React.SetStateAction<number | null>>;
   streamMenuRef: React.RefObject<HTMLDivElement>;
@@ -95,6 +96,7 @@ type StreamsPageProps = {
   runStreamAction: (streamId: number, action: "start" | "stop" | "reboot") => void | Promise<unknown>;
   rescanStream: (streamId: number) => void | Promise<unknown>;
   precacheStreamHls: (streamId: number) => void | Promise<unknown>;
+  cancelStreamHlsPrecache: (streamId: number) => void | Promise<unknown>;
   deleteStream: (streamId: number, streamName: string) => void;
   setConnectionsModalStreamId: React.Dispatch<React.SetStateAction<number | null>>;
 
@@ -201,6 +203,7 @@ export const StreamsPage = ({
   expandedStreamIds,
   toggleStreamExpanded,
   streamHlsPrecacheStatus,
+  cancellingStreamHlsPrecacheIds,
   streamMenuId,
   setStreamMenuId,
   streamMenuRef,
@@ -218,6 +221,7 @@ export const StreamsPage = ({
   runStreamAction,
   rescanStream,
   precacheStreamHls,
+  cancelStreamHlsPrecache,
   deleteStream,
   setConnectionsModalStreamId,
   editingStreamName,
@@ -321,6 +325,7 @@ export const StreamsPage = ({
         expandedStreamIds={expandedStreamIds}
         toggleStreamExpanded={toggleStreamExpanded}
         streamHlsPrecacheStatus={streamHlsPrecacheStatus}
+        cancellingStreamHlsPrecacheIds={cancellingStreamHlsPrecacheIds}
         streamMenuId={streamMenuId}
         setStreamMenuId={setStreamMenuId}
         streamMenuRef={streamMenuRef}
@@ -338,6 +343,7 @@ export const StreamsPage = ({
         runStreamAction={runStreamAction}
         rescanStream={rescanStream}
         precacheStreamHls={precacheStreamHls}
+        cancelStreamHlsPrecache={cancelStreamHlsPrecache}
         deleteStream={deleteStream}
         setConnectionsModalStreamId={setConnectionsModalStreamId}
       />

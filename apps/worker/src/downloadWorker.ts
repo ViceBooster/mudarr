@@ -167,9 +167,31 @@ const hlsCacheDirName = ".mudarr-hls";
 const buildTrackHlsDir = (filePath: string, trackId: number) =>
   path.join(path.dirname(filePath), hlsCacheDirName, `track-${trackId}`);
 
-const runFfmpeg = (args: string[]) =>
+type ActiveHlsSource = "precache" | "download";
+type ActiveHlsProcess = { child: ReturnType<typeof spawn>; source: ActiveHlsSource };
+const activeHlsProcesses = new Map<number, ActiveHlsProcess>();
+const cancelRequestedTracks = new Set<number>();
+
+const registerActiveHlsProcess = (
+  trackId: number,
+  source: ActiveHlsSource,
+  child: ReturnType<typeof spawn>
+) => {
+  activeHlsProcesses.set(trackId, { child, source });
+  const cleanup = () => {
+    const current = activeHlsProcesses.get(trackId);
+    if (current?.child === child) {
+      activeHlsProcesses.delete(trackId);
+    }
+  };
+  child.once("close", cleanup);
+  child.once("error", cleanup);
+};
+
+const runFfmpeg = (args: string[], options?: { onSpawn?: (child: ReturnType<typeof spawn>) => void }) =>
   new Promise<void>((resolve, reject) => {
     const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    options?.onSpawn?.(child);
     let stderr = "";
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -177,11 +199,12 @@ const runFfmpeg = (args: string[]) =>
     child.on("error", (error) => {
       reject(error);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(stderr || `ffmpeg exited with code ${code}`));
+        const suffix = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+        reject(new Error(stderr || `ffmpeg exited (${suffix})`));
       }
     });
   });
@@ -345,12 +368,13 @@ const ensureConcatCopyCompatibleMp4 = async (inputPath: string) => {
   return outputPath;
 };
 
-const segmentTrackToHls = async (trackId: number, filePath: string) => {
+const segmentTrackToHls = async (trackId: number, filePath: string, source: ActiveHlsSource) => {
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error("HLS segmenting failed: file not found");
   }
   const outputDir = buildTrackHlsDir(filePath, trackId);
   const playlistPath = path.join(outputDir, "playlist.m3u8");
+  const onSpawn = (child: ReturnType<typeof spawn>) => registerActiveHlsProcess(trackId, source, child);
 
   const probe = await runFfprobeJson(filePath);
   const summary = summarizeProbe(probe);
@@ -411,7 +435,7 @@ const segmentTrackToHls = async (trackId: number, filePath: string) => {
     if (hasVideo && summary.videoCodec === "h264") {
       copyArgs.push("-bsf:v", "h264_mp4toannexb,dump_extra");
     }
-    await runFfmpeg(copyArgs);
+    await runFfmpeg(copyArgs, { onSpawn });
     return;
   } catch (error) {
     console.warn(`HLS copy segmenting failed for track ${trackId}; falling back to transcode`, error);
@@ -449,7 +473,7 @@ const segmentTrackToHls = async (trackId: number, filePath: string) => {
   if (!hasAudio) {
     transcodeArgs.push("-an");
   }
-  await runFfmpeg(transcodeArgs);
+  await runFfmpeg(transcodeArgs, { onSpawn });
 };
 
 const remuxToMp4 = async (inputPath: string) => {
@@ -670,7 +694,7 @@ const downloadWorker = new Worker(
       ]);
       try {
         await hlsSegmentLimiter(async () => {
-          await segmentTrackToHls(trackId, remuxedPath);
+          await segmentTrackToHls(trackId, remuxedPath, "download");
           await pool.query(
             "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
             ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
@@ -700,7 +724,7 @@ const downloadWorker = new Worker(
           "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
           ["hls_segment_started", `Segmenting HLS for track ${trackId}`, { trackId }]
         );
-        await segmentTrackToHls(trackId, filePath);
+        await segmentTrackToHls(trackId, filePath, "precache");
         await pool.query(
           "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
           ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
@@ -1051,7 +1075,7 @@ const downloadWorker = new Worker(
         if (filePathForHls) {
           try {
             await hlsSegmentLimiter(async () => {
-              await segmentTrackToHls(trackId, filePathForHls);
+              await segmentTrackToHls(trackId, filePathForHls, "download");
               await pool.query(
                 "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
                 ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
@@ -1123,12 +1147,23 @@ const hlsWorker = new Worker(
         ["hls_segment_started", `Segmenting HLS for track ${trackId}`, { trackId }]
       );
       try {
-        await segmentTrackToHls(trackId, filePath);
+        await segmentTrackToHls(trackId, filePath, "precache");
         await pool.query(
           "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
           ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
         );
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const looksCancelled = /signal\s+sigterm|signal\s+sigkill/i.test(message);
+        const cancelled = cancelRequestedTracks.has(trackId) || looksCancelled;
+        if (cancelled) {
+          cancelRequestedTracks.delete(trackId);
+          await pool.query(
+            "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+            ["hls_segment_cancelled", `Cancelled HLS segmentation for track ${trackId}`, { trackId }]
+          );
+          return;
+        }
         await pool.query(
           "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
           ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
@@ -1143,5 +1178,41 @@ const hlsWorker = new Worker(
   }
 );
 
-export { hlsWorker };
+const hlsControlWorker = new Worker(
+  "hlsControlQueue",
+  async (job) => {
+    if (job.name !== "hls-cancel") {
+      return;
+    }
+    const { trackId } = job.data as { trackId: number };
+    if (!Number.isFinite(trackId)) {
+      return;
+    }
+    cancelRequestedTracks.add(trackId);
+    setTimeout(() => cancelRequestedTracks.delete(trackId), 60_000);
+
+    const active = activeHlsProcesses.get(trackId);
+    if (!active || active.source !== "precache") {
+      return;
+    }
+    try {
+      active.child.kill("SIGTERM");
+      setTimeout(() => {
+        try {
+          const current = activeHlsProcesses.get(trackId);
+          if (current?.child === active.child) {
+            active.child.kill("SIGKILL");
+          }
+        } catch {
+          // ignore
+        }
+      }, 5000);
+    } catch {
+      // ignore failures to signal the process
+    }
+  },
+  { connection, concurrency: 5 }
+);
+
+export { hlsWorker, hlsControlWorker };
 export default downloadWorker;

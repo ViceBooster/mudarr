@@ -12,6 +12,7 @@ import { getMediaInfo } from "../services/media.js";
 import { recordStreamBandwidth } from "../services/streamMetrics.js";
 import { getStreamToken } from "../services/streams.js";
 import { requireStreamToken } from "../services/streamAuth.js";
+import hlsControlQueue from "../queue/hlsControlQueue.js";
 import hlsQueue from "../queue/hlsQueue.js";
 
 const router = Router();
@@ -50,6 +51,11 @@ const rescanStreamSchema = z.object({
 const precacheStreamHlsSchema = z.object({
   force: z.boolean().optional(),
   trackIds: z.array(z.number().int()).optional()
+});
+
+const cancelPrecacheStreamHlsSchema = z.object({
+  trackIds: z.array(z.number().int()).optional(),
+  abortActive: z.boolean().optional()
 });
 
 const streamActionSchema = z.object({
@@ -2455,6 +2461,83 @@ router.get("/:id/hls/precache", async (req, res) => {
     percent,
     isComplete: cached >= total
   });
+});
+
+// Cancel queued (and optionally active) HLS precache work for a stream.
+router.post("/:id/hls/precache/cancel", async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid stream id" });
+  }
+  const parsed = cancelPrecacheStreamHlsSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const stream = await loadStream(id);
+  if (!stream) {
+    return res.status(404).json({ error: "Stream not found" });
+  }
+
+  const items = await loadStreamItems(id);
+  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
+    file_path: string;
+    track_id: number;
+  }>;
+
+  const trackFilter = parsed.data.trackIds ? new Set(parsed.data.trackIds) : null;
+  const filtered = trackFilter
+    ? availableItems.filter((item) => trackFilter.has(item.track_id))
+    : availableItems;
+
+  const abortActive = parsed.data.abortActive ?? true;
+  const removeConcurrency = normalizePositiveInt(process.env.HLS_CANCEL_REMOVE_CONCURRENCY) ?? 12;
+
+  const removedFlags = await mapWithConcurrency(filtered, removeConcurrency, async (item) => {
+    const jobId = `hls-segment-${item.track_id}`;
+    try {
+      await hlsQueue.remove(jobId);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const removed = removedFlags.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
+
+  if (abortActive) {
+    const queuedAbortFlags = await mapWithConcurrency(filtered, removeConcurrency, async (item) => {
+      try {
+        await hlsControlQueue.add(
+          "hls-cancel",
+          { trackId: item.track_id },
+          { jobId: `hls-cancel-${item.track_id}`, removeOnComplete: true, removeOnFail: 25 }
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    const abortQueued = queuedAbortFlags.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
+    await pool.query(
+      "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+      [
+        "hls_cache_cancelled",
+        `Cancelled HLS cache jobs for stream ${id}`,
+        { streamId: id, tracks: filtered.length, removed, abortActive, abortQueued }
+      ]
+    );
+    return res.json({ streamId: id, tracks: filtered.length, removed, abortActive, abortQueued });
+  }
+
+  await pool.query(
+    "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
+    [
+      "hls_cache_cancelled",
+      `Cancelled HLS cache jobs for stream ${id}`,
+      { streamId: id, tracks: filtered.length, removed, abortActive }
+    ]
+  );
+  return res.json({ streamId: id, tracks: filtered.length, removed, abortActive });
 });
 
 router.delete("/:id", async (req, res) => {
