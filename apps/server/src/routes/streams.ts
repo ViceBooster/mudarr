@@ -233,6 +233,25 @@ const clearTrackHlsCache = async (filePath: string, trackId: number) => {
   }
 };
 
+const warmMissingTrackHlsCache = async (
+  items: Array<{ file_path: string; track_id: number }>,
+  options?: { reason?: string }
+) => {
+  const concurrency = normalizePositiveInt(process.env.HLS_WARM_MISSING_CONCURRENCY) ?? 8;
+  const reason = options?.reason ? ` (${options.reason})` : "";
+  await mapWithConcurrency(items, concurrency, async (item) => {
+    try {
+      const parsed = await readTrackHlsPlaylist(item.file_path, item.track_id);
+      if (parsed) {
+        return;
+      }
+      await queueHlsSegmentJob(item.track_id, item.file_path);
+    } catch (error) {
+      console.warn(`Failed to warm missing HLS cache for track ${item.track_id}${reason}`, error);
+    }
+  });
+};
+
 const queueHlsSegmentJob = async (trackId: number, filePath: string) => {
   try {
     await withTimeout(
@@ -1124,6 +1143,14 @@ const hlsLiveReadyTimeoutMs =
   Number.isFinite(hlsLiveReadyTimeoutMsRaw) && hlsLiveReadyTimeoutMsRaw > 0
     ? Math.floor(hlsLiveReadyTimeoutMsRaw)
     : 20_000;
+
+// When using the cached ("radio") playlist endpoint, allow a longer wait before returning 503,
+// since many restreamers expect a playlist to become available shortly after start.
+const hlsRadioReadyTimeoutMsRaw = Number(process.env.HLS_RADIO_READY_TIMEOUT_MS ?? 30_000);
+const hlsRadioReadyTimeoutMs =
+  Number.isFinite(hlsRadioReadyTimeoutMsRaw) && hlsRadioReadyTimeoutMsRaw > 0
+    ? Math.floor(hlsRadioReadyTimeoutMsRaw)
+    : 30_000;
 
 // Prevent orphaned/idle stream generators from running forever.
 // Any request to the HLS session playlist/segments refreshes `lastAccess`.
@@ -2146,10 +2173,8 @@ router.patch("/:id", async (req, res) => {
     if (availableItems.length > 0) {
       // Start live HLS immediately; cache/queue work should not block the stream from starting.
       await ensureHlsSession(stream, availableItems);
-      void Promise.all(
-        availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id))
-      );
-      void Promise.all(availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
+      // Warm missing cached-HLS tracks in the background; do NOT clear existing caches on start.
+      void warmMissingTrackHlsCache(availableItems, { reason: "update:status-active" });
     }
   }
   const payload = await buildStreamResponse(stream);
@@ -2280,11 +2305,8 @@ router.post("/:id/actions", async (req, res) => {
     }
     if (availableItems.length > 0) {
       await ensureHlsSession(stream, availableItems);
-      // Cache/queue in the background so Redis slowness doesn't block stream start.
-      void Promise.all(
-        availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id))
-      );
-      void Promise.all(availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
+      // Warm missing cached-HLS tracks in the background; do NOT clear existing caches on start.
+      void warmMissingTrackHlsCache(availableItems, { reason: `action:${action}` });
     }
   }
   const payload = await buildStreamResponse(stream);
@@ -2353,8 +2375,8 @@ router.post("/:id/rescan", async (req, res) => {
   }>;
   if (availableItems.length > 0) {
     await ensureHlsSession(stream, availableItems);
-    void Promise.all(availableItems.map((item) => clearTrackHlsCache(item.file_path, item.track_id)));
-    void Promise.all(availableItems.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
+    // Warm missing cached-HLS tracks in the background; do NOT clear existing caches on rescan.
+    void warmMissingTrackHlsCache(availableItems, { reason: "rescan" });
   }
   const payload = await buildStreamResponse(stream);
   res.json(payload);
@@ -2663,6 +2685,86 @@ router.get("/:id/hls/playlist.m3u8", async (req, res) => {
       return res.send(retryResult.playlist);
     }
   }
+  return res.status(503).json({ error: "HLS cache not ready" });
+});
+
+// "Radio" HLS: always uses the cached playlist flow (never the live ffmpeg session).
+// Intended for restreamers/clients that don't support /hls/live.m3u8 well.
+router.get("/:id/hls/radio.m3u8", async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid stream id" });
+  }
+  const token = await requireStreamToken(req, res);
+  if (!token) {
+    return;
+  }
+  const stream = await loadStream(id);
+  if (!stream) {
+    return res.status(404).json({ error: "Stream not found" });
+  }
+  if (stream.status !== "active") {
+    return res.status(409).json({ error: "Stream is stopped" });
+  }
+  registerStreamClient(id, req, { path: req.originalUrl ?? req.path });
+  const items = await loadStreamItems(id);
+  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
+    file_path: string;
+    artist_name: string | null;
+    track_id: number;
+    title: string;
+  }>;
+  if (availableItems.length === 0) {
+    return res.status(404).json({ error: "No downloadable tracks in this stream" });
+  }
+
+  const playback = buildStreamPlaybackPlan(stream, availableItems);
+  const baseUrl = await getBaseUrl(req);
+  const elapsedSeconds = getStreamElapsedSeconds(stream);
+  const cachedResult = await buildCachedHlsPlaylist(
+    playback.ordered as Array<{
+      track_id: number;
+      file_path: string;
+      artist_name: string | null;
+      title: string;
+    }>,
+    baseUrl,
+    token,
+    elapsedSeconds
+  );
+  if (cachedResult.playlist) {
+    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    res.setHeader("Cache-Control", "no-store");
+    recordStreamBandwidth(Buffer.byteLength(cachedResult.playlist));
+    return res.send(cachedResult.playlist);
+  }
+
+  if (cachedResult.missing.length > 0) {
+    await Promise.all(cachedResult.missing.map((item) => queueHlsSegmentJob(item.track_id, item.file_path)));
+  }
+
+  if (playback.ordered.length > 0) {
+    const first = playback.ordered[0] as { track_id: number; file_path: string };
+    await waitForTrackHlsReady(first.file_path, first.track_id, hlsRadioReadyTimeoutMs);
+    const retryResult = await buildCachedHlsPlaylist(
+      playback.ordered as Array<{
+        track_id: number;
+        file_path: string;
+        artist_name: string | null;
+        title: string;
+      }>,
+      baseUrl,
+      token,
+      elapsedSeconds
+    );
+    if (retryResult.playlist) {
+      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+      res.setHeader("Cache-Control", "no-store");
+      recordStreamBandwidth(Buffer.byteLength(retryResult.playlist));
+      return res.send(retryResult.playlist);
+    }
+  }
+
   return res.status(503).json({ error: "HLS cache not ready" });
 });
 

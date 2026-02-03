@@ -7,7 +7,7 @@ type Args = {
   playingStreamId: number | null;
   playingStream: StreamSummary | null;
   streamPlayerRef: React.RefObject<HTMLVideoElement>;
-  streamLiveUrl: (streamId: number) => string | null;
+  streamHlsUrl: (streamId: number) => string | null;
   reloadKey: string | null;
   setStreamPlayerNotice: (notice: string | null) => void;
 };
@@ -16,7 +16,7 @@ export function useStreamHlsPlayback({
   playingStreamId,
   playingStream,
   streamPlayerRef,
-  streamLiveUrl,
+  streamHlsUrl,
   reloadKey,
   setStreamPlayerNotice
 }: Args) {
@@ -39,7 +39,7 @@ export function useStreamHlsPlayback({
     if (!stream) {
       return;
     }
-    const hlsUrl = streamLiveUrl(stream.id);
+    const hlsUrl = streamHlsUrl(stream.id);
     if (!hlsUrl) {
       return;
     }

@@ -27,6 +27,45 @@ type StreamOnlineFilter = "all" | "online" | "offline";
 type StreamSort = "name-asc" | "name-desc" | "uptime-desc" | "uptime-asc";
 type StreamSource = "manual" | "artists" | "genres";
 
+const hlsPrecacheWatchStorageKey = "mudarr-hls-precache-watch";
+const loadWatchedHlsPrecacheStreamIds = (): number[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(hlsPrecacheWatchStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    const now = Date.now();
+    const maxAgeMs = 2 * 60 * 60_000;
+    if (!parsed || typeof parsed !== "object") return [];
+    const ids: number[] = [];
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const id = Number(key);
+      const ts = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      if (!Number.isFinite(ts) || ts <= 0) continue;
+      if (now - ts > maxAgeMs) continue;
+      ids.push(id);
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+};
+
+const persistWatchedHlsPrecacheStreamIds = (ids: number[]) => {
+  if (typeof window === "undefined") return;
+  try {
+    const now = Date.now();
+    const payload: Record<string, number> = {};
+    for (const id of ids) {
+      payload[String(id)] = now;
+    }
+    localStorage.setItem(hlsPrecacheWatchStorageKey, JSON.stringify(payload));
+  } catch {
+    // ignore storage errors
+  }
+};
+
 type Args = {
   canUseApi: boolean;
   streamsEnabled: boolean;
@@ -96,6 +135,9 @@ export function useStreamsFeature({
   const [selectedStreamTracks, setSelectedStreamTracks] = useState<StreamTrackOption[]>([]);
   const [isCreatingStream, setIsCreatingStream] = useState(false);
   const [expandedStreamIds, setExpandedStreamIds] = useState<number[]>([]);
+  const [watchedHlsPrecacheStreamIds, setWatchedHlsPrecacheStreamIds] = useState<number[]>(
+    () => loadWatchedHlsPrecacheStreamIds()
+  );
   const [streamHlsPrecacheStatus, setStreamHlsPrecacheStatus] = useState<
     Record<number, StreamHlsPrecacheStatus>
   >({});
@@ -482,6 +524,9 @@ export function useStreamsFeature({
     try {
       const status = await apiGet<StreamHlsPrecacheStatus>(`/api/streams/${streamId}/hls/precache`);
       setStreamHlsPrecacheStatus((prev) => ({ ...prev, [streamId]: status }));
+      if (status.isComplete) {
+        setWatchedHlsPrecacheStreamIds((prev) => prev.filter((id) => id !== streamId));
+      }
     } catch {
       // ignore background status fetch failures
     }
@@ -489,12 +534,17 @@ export function useStreamsFeature({
 
   useEffect(() => {
     if (!canUseApi) return;
-    if (expandedStreamIds.length === 0) return;
+    if (!pathname.startsWith("/streams")) return;
+
+    const pollIds = Array.from(
+      new Set<number>([...expandedStreamIds, ...watchedHlsPrecacheStreamIds])
+    );
+    if (pollIds.length === 0) return;
 
     let cancelled = false;
     const poll = async () => {
       await Promise.all(
-        expandedStreamIds.map(async (streamId) => {
+        pollIds.map(async (streamId) => {
           if (cancelled) return;
           await fetchStreamHlsPrecacheStatus(streamId);
         })
@@ -510,13 +560,17 @@ export function useStreamsFeature({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [apiGet, canUseApi, expandedStreamIds]);
+  }, [apiGet, canUseApi, expandedStreamIds, pathname, watchedHlsPrecacheStreamIds]);
+
+  useEffect(() => {
+    persistWatchedHlsPrecacheStreamIds(watchedHlsPrecacheStreamIds);
+  }, [watchedHlsPrecacheStreamIds]);
 
   const toggleStreamMenu = (streamId: number) => {
     setStreamMenuId((prev) => (prev === streamId ? null : streamId));
   };
 
-  type StreamHlsUrlMode = "live" | "cached";
+  type StreamHlsUrlMode = "live" | "cached" | "radio";
 
   const buildStreamHlsUrl = (
     streamId: number,
@@ -525,16 +579,27 @@ export function useStreamsFeature({
   ) => {
     const token = streamSettings?.token || streamToken;
     if (!token) return "";
-    const playlistPath = mode === "live" ? "live.m3u8" : "playlist.m3u8";
+    const playlistPath =
+      mode === "live" ? "live.m3u8" : mode === "radio" ? "radio.m3u8" : "playlist.m3u8";
     return `${baseUrl}/api/streams/${streamId}/hls/${playlistPath}?token=${encodeURIComponent(token)}`;
   };
 
   const streamLiveUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl, "live");
   const streamCachedUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl, "cached");
 
+  // "Radio style" playback: prefer cached playlist if we know it's complete, otherwise fall back to live.
+  const streamRadioUrl = (streamId: number) => {
+    const status = streamHlsPrecacheStatus[streamId];
+    if (status?.isComplete) {
+      const cached = streamCachedUrl(streamId);
+      if (cached) return cached;
+    }
+    return streamLiveUrl(streamId);
+  };
+
   const shareableStreamUrl = (streamId: number) => {
     const base = generalPublicApiBaseUrl.trim() || generalDomain.trim() || apiBaseUrl;
-    return buildStreamHlsUrl(streamId, base, "live");
+    return buildStreamHlsUrl(streamId, base, "radio");
   };
 
   const escapeM3uValue = (value: string) => value.replace(/[\r\n]+/g, " ").replace(/\"/g, "'").trim();
@@ -557,7 +622,7 @@ export function useStreamsFeature({
     });
     const lines = sortedStreams
       .map((stream) => {
-        const url = buildStreamHlsUrl(stream.id, base, "live");
+        const url = buildStreamHlsUrl(stream.id, base, "radio");
         if (!url) return null;
         const safeName = escapeM3uValue(stream.name || `Stream ${stream.id}`);
         const tags = [
@@ -591,6 +656,7 @@ export function useStreamsFeature({
   const precacheStreamHls = async (streamId: number, options?: { force?: boolean }) => {
     if (!canUseApi) return;
     setError(null);
+    setWatchedHlsPrecacheStreamIds((prev) => (prev.includes(streamId) ? prev : [...prev, streamId]));
     try {
       await apiPost<{ streamId: number; queued: number; force: boolean }>(
         `/api/streams/${streamId}/hls/precache`,
@@ -873,6 +939,7 @@ export function useStreamsFeature({
   };
 
   const openStreamPlayer = (streamId: number) => {
+    void fetchStreamHlsPrecacheStatus(streamId);
     setPlayingStreamId(streamId);
     setStreamPlayerNotice(null);
   };
@@ -895,14 +962,15 @@ export function useStreamsFeature({
   const playingStreamReloadKey = useMemo(() => {
     if (!playingStream) return null;
     const token = streamSettings?.token || streamToken || "";
-    return `${playingStream.id}:${playingStream.status}:${playingStream.encoding}:${token}`;
-  }, [playingStream, streamSettings?.token, streamToken]);
+    const cacheComplete = streamHlsPrecacheStatus[playingStream.id]?.isComplete ? "cached" : "live";
+    return `${playingStream.id}:${playingStream.status}:${playingStream.encoding}:${token}:${cacheComplete}`;
+  }, [playingStream, streamHlsPrecacheStatus, streamSettings?.token, streamToken]);
 
   useStreamHlsPlayback({
     playingStreamId,
     playingStream,
     streamPlayerRef,
-    streamLiveUrl,
+    streamHlsUrl: streamRadioUrl,
     reloadKey: playingStreamReloadKey,
     setStreamPlayerNotice
   });
@@ -991,6 +1059,7 @@ export function useStreamsFeature({
     toggleStreamExpanded,
     streamHlsPrecacheStatus,
     cancellingStreamHlsPrecacheIds,
+    watchedHlsPrecacheStreamIds,
     streamMenuId,
     setStreamMenuId,
     streamMenuRef,

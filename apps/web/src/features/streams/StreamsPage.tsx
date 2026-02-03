@@ -79,6 +79,7 @@ type StreamsPageProps = {
   toggleStreamExpanded: (streamId: number) => void;
   streamHlsPrecacheStatus: Record<number, StreamHlsPrecacheStatus>;
   cancellingStreamHlsPrecacheIds: number[];
+  watchedHlsPrecacheStreamIds: number[];
   streamMenuId: number | null;
   setStreamMenuId: React.Dispatch<React.SetStateAction<number | null>>;
   streamMenuRef: React.RefObject<HTMLDivElement>;
@@ -204,6 +205,7 @@ export const StreamsPage = ({
   toggleStreamExpanded,
   streamHlsPrecacheStatus,
   cancellingStreamHlsPrecacheIds,
+  watchedHlsPrecacheStreamIds,
   streamMenuId,
   setStreamMenuId,
   streamMenuRef,
@@ -326,6 +328,7 @@ export const StreamsPage = ({
         toggleStreamExpanded={toggleStreamExpanded}
         streamHlsPrecacheStatus={streamHlsPrecacheStatus}
         cancellingStreamHlsPrecacheIds={cancellingStreamHlsPrecacheIds}
+        watchedHlsPrecacheStreamIds={watchedHlsPrecacheStreamIds}
         streamMenuId={streamMenuId}
         setStreamMenuId={setStreamMenuId}
         streamMenuRef={streamMenuRef}
