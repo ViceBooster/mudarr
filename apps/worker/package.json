@@ -1,6 +1,6 @@
 {
   "name": "@mudarr/worker",
-  "version": "1.0.29",
+  "version": "1.0.30",
   "private": true,
   "type": "module",
   "scripts": {
@@ -18,6 +18,6 @@
     "@types/pg": "^8.10.2",
     "tsx": "^4.15.5",
     "typescript": "^5.4.5",
-    "vitest": "^1.6.0"
+    "vitest": "^4.0.18"
   }
 }
