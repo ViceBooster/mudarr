@@ -2,21 +2,13 @@
 
 # Mudarr
 
-Self-hosted music video automation inspired by Sonarr/Radarr.
+A self-hosted Radarr/Sonarr inspired automated music video management/grabber application.
 
 ## UI examples
 
 ### Dashboard
 
-![Dashboard](apps/web/public/dashboard.png)
-
-### Streams
-
-![Streams](apps/web/public/streams.png)
-
-### Player
-
-![Player](apps/web/public/player.png)
+![Dashboard](apps/web/public/readme_preview.jpg)
 
 ## Architecture
 

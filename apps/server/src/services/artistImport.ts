@@ -53,10 +53,50 @@ type ImportData = {
 type DbQuery = Pool["query"] | PoolClient["query"];
 type DbClient = { query: DbQuery };
 
+type ArtistImportJobStatus = "pending" | "processing" | "completed" | "failed" | "cancelled";
+
 const isImportCancelled = async (db: DbClient, jobId: number) => {
   const result = await db.query("SELECT status FROM artist_import_jobs WHERE id = $1", [jobId]);
   return result.rows[0]?.status === "cancelled";
 };
+
+const resolveArtistImportConcurrency = () => {
+  const raw = Number(process.env.ARTIST_IMPORT_CONCURRENCY ?? 1);
+  if (!Number.isFinite(raw)) return 1;
+  return Math.max(1, Math.floor(raw));
+};
+
+const createConcurrencyLimiter = (limit: number) => {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+
+  const acquire = async () => {
+    if (active < limit) {
+      active += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => waiters.push(resolve));
+    active += 1;
+  };
+
+  const release = () => {
+    active = Math.max(0, active - 1);
+    const next = waiters.shift();
+    next?.();
+  };
+
+  return async <T>(fn: () => Promise<T>) => {
+    await acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
+};
+
+const importLimiter = createConcurrencyLimiter(resolveArtistImportConcurrency());
+const activeImportJobs = new Set<number>();
 
 const resolveLatestAlbumIds = (albums: Array<{ id: string; year: number | null }>) => {
   const years = albums.map((album) => album.year).filter((year): year is number => year !== null);
@@ -94,6 +134,54 @@ const dedupeTracksByExternalId = <T extends { externalId: string }>(tracks: T[])
     deduped.push(track);
   }
   return deduped;
+};
+
+const upsertTracksBulk = async (db: DbClient, params: {
+  albumId: number;
+  trackSource: string | null;
+  shouldMonitor: boolean;
+  tracks: Array<{ externalId: string; title: string; trackNo: number | null }>;
+}) => {
+  const normalizedTracks = dedupeTracksByExternalId(
+    params.tracks
+      .map((track) => ({
+        externalId: track.externalId,
+        title: track.title.trim(),
+        trackNo: track.trackNo ?? null
+      }))
+      .filter((track) => track.externalId && track.title.length > 0)
+  );
+  if (normalizedTracks.length === 0) {
+    return [] as Array<{ id: number; external_id: string }>;
+  }
+
+  const albumIds = normalizedTracks.map(() => params.albumId);
+  const titles = normalizedTracks.map((t) => t.title);
+  const trackNos = normalizedTracks.map((t) => t.trackNo);
+  const sources = normalizedTracks.map(() => params.trackSource);
+  const externalIds = normalizedTracks.map((t) => t.externalId);
+  const monitored = normalizedTracks.map(() => params.shouldMonitor);
+
+  const result = await db.query(
+    `INSERT INTO tracks (album_id, title, track_no, external_source, external_id, monitored)
+     SELECT * FROM UNNEST(
+       $1::int[],
+       $2::text[],
+       $3::int[],
+       $4::text[],
+       $5::text[],
+       $6::boolean[]
+     )
+     ON CONFLICT (external_source, external_id)
+     DO UPDATE SET
+       title = EXCLUDED.title,
+       track_no = EXCLUDED.track_no,
+       album_id = EXCLUDED.album_id,
+       monitored = EXCLUDED.monitored
+     RETURNING id, external_id`,
+    [albumIds, titles, trackNos, sources, externalIds, monitored]
+  );
+  return result.rows as Array<{ id: number; external_id: string }>;
 };
 
 const splitGenreTokens = (value?: string | null) => {
@@ -418,14 +506,21 @@ const upsertGenreId = async (db: DbClient, name: string) => {
 export const addArtistGenres = async (db: DbClient, artistId: number, genreNames: string[]) => {
   const normalized = normalizeGenreNames(genreNames);
   if (normalized.length === 0) return;
-  for (const name of normalized) {
-    const genreId = await upsertGenreId(db, name);
-    if (!genreId) continue;
-    await db.query(
-      "INSERT INTO artist_genres (artist_id, genre_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-      [artistId, genreId]
-    );
-  }
+  // Bulk insert missing genres, then bulk link to artist.
+  await db.query(
+    `INSERT INTO genres (name)
+     SELECT DISTINCT UNNEST($1::text[])
+     ON CONFLICT (name) DO NOTHING`,
+    [normalized]
+  );
+  await db.query(
+    `INSERT INTO artist_genres (artist_id, genre_id)
+     SELECT $1, g.id
+     FROM genres g
+     WHERE g.name = ANY($2::text[])
+     ON CONFLICT DO NOTHING`,
+    [artistId, normalized]
+  );
 };
 
 export const replaceArtistGenres = async (
@@ -437,6 +532,57 @@ export const replaceArtistGenres = async (
   if (normalized.length === 0) return;
   await db.query("DELETE FROM artist_genres WHERE artist_id = $1", [artistId]);
   await addArtistGenres(db, artistId, normalized);
+};
+
+export async function getArtistImportJobStatus(jobId: number): Promise<{
+  id: number;
+  status: ArtistImportJobStatus;
+  artistId: number | null;
+  errorMessage: string | null;
+}> {
+  const result = await pool.query(
+    "SELECT id, status, artist_id, error_message FROM artist_import_jobs WHERE id = $1",
+    [jobId]
+  );
+  const row = result.rows[0] as
+    | { id: number; status: ArtistImportJobStatus; artist_id: number | null; error_message: string | null }
+    | undefined;
+  if (!row) {
+    return { id: jobId, status: "failed", artistId: null, errorMessage: "Import job not found" };
+  }
+  return { id: row.id, status: row.status, artistId: row.artist_id ?? null, errorMessage: row.error_message ?? null };
+}
+
+export async function waitForArtistImportJob(jobId: number, options?: { pollMs?: number }) {
+  const pollMs = Math.max(250, Math.floor(options?.pollMs ?? 2000));
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const status = await getArtistImportJobStatus(jobId);
+    if (status.status === "completed" || status.status === "failed" || status.status === "cancelled") {
+      return status;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
+const enqueueArtistImportProcessing = (jobId: number) => {
+  if (activeImportJobs.has(jobId)) {
+    return;
+  }
+  activeImportJobs.add(jobId);
+  void importLimiter(async () => {
+    try {
+      await processArtistImportJob(jobId);
+    } finally {
+      activeImportJobs.delete(jobId);
+    }
+  }).catch((error) => {
+    activeImportJobs.delete(jobId);
+    console.error("Failed to run artist import job", {
+      jobId,
+      error: error instanceof Error ? error.message : error
+    });
+  });
 };
 
 /**
@@ -462,13 +608,8 @@ export async function queueArtistImport(options: ArtistImportOptions) {
 
   const jobId = result.rows[0]?.id as number;
 
-  // Fire and forget the background processing
-  void processArtistImportJob(jobId).catch((error) => {
-    console.error("Failed to process artist import job", {
-      jobId,
-      error: error instanceof Error ? error.message : error
-    });
-  });
+  // Fire and forget the background processing, with a global concurrency cap.
+  enqueueArtistImportProcessing(jobId);
 
   return { jobId, artistName: artistData.name };
 }
@@ -600,49 +741,28 @@ async function processArtistImportJob(jobId: number) {
         const albumId = albumResult.rows[0].id as number;
 
         const tracks = tracksByAlbumId.get(album.id) ?? [];
-        const normalizedTracks = dedupeTracksByExternalId(
-          tracks
-          .map((track) => ({
+        const trackSource = album.source || artistSource;
+        const trackResultRows = await upsertTracksBulk(client, {
+          albumId,
+          trackSource,
+          shouldMonitor,
+          tracks: tracks.map((track) => ({
             externalId: track.id,
             title: track.title?.trim() ?? "",
             trackNo: track.trackNo ?? null
           }))
-          .filter((track) => track.title.length > 0)
-        );
-      if (normalizedTracks.length === 0) {
-        continue;
-      }
-      const values: Array<string | number | boolean | null> = [];
-      const trackSource = album.source || artistSource;
-      const placeholders = normalizedTracks.map((track, index) => {
-        const offset = index * 6;
-        values.push(
-          albumId,
-          track.title,
-          track.trackNo,
-          trackSource,
-          track.externalId,
-          shouldMonitor
-        );
-          return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`;
         });
-        const trackResult = await client.query(
-          `INSERT INTO tracks (album_id, title, track_no, external_source, external_id, monitored)
-           VALUES ${placeholders.join(", ")}
-           ON CONFLICT (external_source, external_id)
-           DO UPDATE SET title = EXCLUDED.title, track_no = EXCLUDED.track_no, album_id = EXCLUDED.album_id, monitored = EXCLUDED.monitored
-           RETURNING id, external_id`,
-          values
-        );
         if (auto_download && shouldMonitor) {
           const trackIdByExternal = new Map<string, number>();
-          for (const row of trackResult.rows as Array<{ id: number; external_id: string }>) {
+          for (const row of trackResultRows) {
             trackIdByExternal.set(row.external_id, row.id);
           }
-          for (const track of normalizedTracks) {
-            const trackId = trackIdByExternal.get(track.externalId);
+          for (const track of tracks) {
+            const title = track.title?.trim() ?? "";
+            if (!title) continue;
+            const trackId = trackIdByExternal.get(track.id);
             if (!trackId) continue;
-            const query = `${artistData.name} - ${track.title}`;
+            const query = `${artistData.name} - ${title}`;
             queuedDownloads.push({
               query,
               quality,
@@ -772,49 +892,28 @@ export async function importArtistFromAudioDb(options: ArtistImportOptions) {
       const albumId = albumResult.rows[0].id as number;
 
       const tracks = tracksByAlbumId.get(album.id) ?? [];
-    const normalizedTracks = dedupeTracksByExternalId(
-      tracks
-        .map((track) => ({
+      const trackSource = album.source || artistSource;
+      const trackResultRows = await upsertTracksBulk(client, {
+        albumId,
+        trackSource,
+        shouldMonitor,
+        tracks: tracks.map((track) => ({
           externalId: track.id,
           title: track.title?.trim() ?? "",
           trackNo: track.trackNo ?? null
         }))
-      .filter((track) => track.title.length > 0)
-    );
-      if (normalizedTracks.length === 0) {
-        continue;
-      }
-      const values: Array<string | number | boolean | null> = [];
-    const trackSource = album.source || artistSource;
-      const placeholders = normalizedTracks.map((track, index) => {
-        const offset = index * 6;
-        values.push(
-          albumId,
-          track.title,
-          track.trackNo,
-        trackSource,
-          track.externalId,
-          shouldMonitor
-        );
-        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`;
       });
-      const trackResult = await client.query(
-        `INSERT INTO tracks (album_id, title, track_no, external_source, external_id, monitored)
-         VALUES ${placeholders.join(", ")}
-         ON CONFLICT (external_source, external_id)
-         DO UPDATE SET title = EXCLUDED.title, track_no = EXCLUDED.track_no, album_id = EXCLUDED.album_id, monitored = EXCLUDED.monitored
-         RETURNING id, external_id`,
-        values
-      );
       if (autoDownload && shouldMonitor) {
         const trackIdByExternal = new Map<string, number>();
-        for (const row of trackResult.rows as Array<{ id: number; external_id: string }>) {
+        for (const row of trackResultRows) {
           trackIdByExternal.set(row.external_id, row.id);
         }
-        for (const track of normalizedTracks) {
-          const trackId = trackIdByExternal.get(track.externalId);
+        for (const track of tracks) {
+          const title = track.title?.trim() ?? "";
+          if (!title) continue;
+          const trackId = trackIdByExternal.get(track.id);
           if (!trackId) continue;
-          const query = `${artistData.name} - ${track.title}`;
+          const query = `${artistData.name} - ${title}`;
           queuedDownloads.push({
             query,
             quality,
@@ -870,25 +969,27 @@ const queueImportDownloads = async (downloads: ImportDownload[]) => {
     for (let start = 0; start < downloads.length; start += batchSize) {
       const chunk = downloads.slice(start, start + batchSize);
       await client.query("BEGIN");
-      const values: Array<string | number | null> = [];
-      const placeholders = chunk.map((download, index) => {
-        const offset = index * 7;
-        values.push(
-          "queued",
-          "import",
-          download.query,
-          download.quality,
-          0,
-          download.trackId,
-          download.albumId
-        );
-        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`;
-      });
+      const statuses = chunk.map(() => "queued");
+      const sources = chunk.map(() => "import");
+      const queries = chunk.map((download) => download.query);
+      const qualities = chunk.map((download) => download.quality);
+      const percents = chunk.map(() => 0);
+      const trackIds = chunk.map((download) => download.trackId);
+      const albumIds = chunk.map((download) => download.albumId);
+
       const insertResult = await client.query(
         `INSERT INTO download_jobs (status, source, query, quality, progress_percent, track_id, album_id)
-         VALUES ${placeholders.join(", ")}
+         SELECT * FROM UNNEST(
+           $1::text[],
+           $2::text[],
+           $3::text[],
+           $4::text[],
+           $5::int[],
+           $6::int[],
+           $7::int[]
+         )
          RETURNING id`,
-        values
+        [statuses, sources, queries, qualities, percents, trackIds, albumIds]
       );
       const inserted = insertResult.rows as Array<{ id: number }>;
 

@@ -3,7 +3,7 @@ import { Router } from "express";
 import { z } from "zod";
 import pool from "../db/pool.js";
 import { searchArtistExact } from "../services/audiodb.js";
-import { addArtistGenres, importArtistFromAudioDb } from "../services/artistImport.js";
+import { addArtistGenres, queueArtistImport, waitForArtistImportJob } from "../services/artistImport.js";
 import { getTopArtistsByTag, getTopTags } from "../services/lastfm.js";
 
 const router = Router();
@@ -167,18 +167,35 @@ const runGenreImport = async (params: {
           skipped += 1;
           continue;
         }
-        const result = await importArtistFromAudioDb({
+        const queued = await queueArtistImport({
           audiodbId: match.id,
+          artistName: match.name,
           importMode,
           quality,
           autoDownload
         });
-        if (!result) {
+        if (!queued) {
           skipped += 1;
           continue;
         }
-        await addArtistGenres(pool, result.artist.id, [genreName]);
-        imported += 1;
+        const final = await waitForArtistImportJob(queued.jobId, { pollMs: 2000 });
+        if (final.status === "completed" && final.artistId) {
+          await addArtistGenres(pool, final.artistId, [genreName]);
+          imported += 1;
+        } else if (final.status === "cancelled") {
+          skipped += 1;
+        } else {
+          errors += 1;
+          const message = final.errorMessage || "Artist import failed";
+          errorDetails.push({ name, message });
+          console.error("Genre import artist job failed", {
+            genre: genreName,
+            artist: name,
+            jobId: queued.jobId,
+            status: final.status,
+            message
+          });
+        }
       } catch (error) {
         errors += 1;
         const message = error instanceof Error ? error.message : "Unknown error";

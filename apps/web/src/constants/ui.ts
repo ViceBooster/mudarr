@@ -1,0 +1,14 @@
+export const PLAYER_DEFAULT_WIDTH = 520;
+export const PLAYER_DEFAULT_HEIGHT = 260;
+export const PLAYER_MIN_WIDTH = 320;
+export const PLAYER_MIN_HEIGHT = 200;
+export const PLAYER_COMPACT_WIDTH = 220;
+export const PLAYER_COMPACT_HEIGHT = 180;
+
+export const DOWNLOADS_PAGE_SIZE = 20;
+
+export const DASHBOARD_STATS_INTERVAL_MS = 5000;
+export const DASHBOARD_STATS_RENDER_POINTS = 60;
+
+export const LOADING_MIN_MS = 2000;
+
