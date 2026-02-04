@@ -7,7 +7,6 @@ import type {
   ArtistPreference,
   Genre,
   StreamEncoding,
-  StreamHlsPrecacheStatus,
   StreamSettings,
   StreamStatus,
   StreamSummary,
@@ -26,45 +25,6 @@ type ApiDelete = (path: string) => Promise<void>;
 type StreamOnlineFilter = "all" | "online" | "offline";
 type StreamSort = "name-asc" | "name-desc" | "uptime-desc" | "uptime-asc";
 type StreamSource = "manual" | "artists" | "genres";
-
-const hlsPrecacheWatchStorageKey = "mudarr-hls-precache-watch";
-const loadWatchedHlsPrecacheStreamIds = (): number[] => {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(hlsPrecacheWatchStorageKey);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    const now = Date.now();
-    const maxAgeMs = 2 * 60 * 60_000;
-    if (!parsed || typeof parsed !== "object") return [];
-    const ids: number[] = [];
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      const id = Number(key);
-      const ts = typeof value === "number" ? value : Number(value);
-      if (!Number.isFinite(id) || id <= 0) continue;
-      if (!Number.isFinite(ts) || ts <= 0) continue;
-      if (now - ts > maxAgeMs) continue;
-      ids.push(id);
-    }
-    return ids;
-  } catch {
-    return [];
-  }
-};
-
-const persistWatchedHlsPrecacheStreamIds = (ids: number[]) => {
-  if (typeof window === "undefined") return;
-  try {
-    const now = Date.now();
-    const payload: Record<string, number> = {};
-    for (const id of ids) {
-      payload[String(id)] = now;
-    }
-    localStorage.setItem(hlsPrecacheWatchStorageKey, JSON.stringify(payload));
-  } catch {
-    // ignore storage errors
-  }
-};
 
 type Args = {
   canUseApi: boolean;
@@ -124,7 +84,6 @@ export function useStreamsFeature({
   const [streamSource, setStreamSource] = useState<StreamSource>("manual");
   const [streamShuffle, setStreamShuffle] = useState(false);
   const [streamEncoding, setStreamEncoding] = useState<StreamEncoding>("original");
-  const [streamPrecacheHls, setStreamPrecacheHls] = useState(true);
   const [streamArtistQuery, setStreamArtistQuery] = useState("");
   const [streamGenreQuery, setStreamGenreQuery] = useState("");
   const [streamArtistIds, setStreamArtistIds] = useState<number[]>([]);
@@ -135,13 +94,6 @@ export function useStreamsFeature({
   const [selectedStreamTracks, setSelectedStreamTracks] = useState<StreamTrackOption[]>([]);
   const [isCreatingStream, setIsCreatingStream] = useState(false);
   const [expandedStreamIds, setExpandedStreamIds] = useState<number[]>([]);
-  const [watchedHlsPrecacheStreamIds, setWatchedHlsPrecacheStreamIds] = useState<number[]>(
-    () => loadWatchedHlsPrecacheStreamIds()
-  );
-  const [streamHlsPrecacheStatus, setStreamHlsPrecacheStatus] = useState<
-    Record<number, StreamHlsPrecacheStatus>
-  >({});
-  const [cancellingStreamHlsPrecacheIds, setCancellingStreamHlsPrecacheIds] = useState<number[]>([]);
   const [streamMenuId, setStreamMenuId] = useState<number | null>(null);
   const streamMenuRef = useRef<HTMLDivElement>(null);
 
@@ -152,7 +104,6 @@ export function useStreamsFeature({
   const [editingStreamShuffle, setEditingStreamShuffle] = useState(false);
   const [editingStreamStatus, setEditingStreamStatus] = useState<StreamStatus>("active");
   const [editingStreamRestartOnSave, setEditingStreamRestartOnSave] = useState(true);
-  const [editingStreamPrecacheHls, setEditingStreamPrecacheHls] = useState(false);
   const [editingStreamTab, setEditingStreamTab] = useState<"artists" | "tracks">("artists");
   const [editingStreamTracks, setEditingStreamTracks] = useState<StreamTrackOption[]>([]);
   const [editingStreamSelectedIds, setEditingStreamSelectedIds] = useState<number[]>([]);
@@ -519,87 +470,24 @@ export function useStreamsFeature({
     );
   };
 
-  const fetchStreamHlsPrecacheStatus = async (streamId: number) => {
-    if (!canUseApi) return;
-    try {
-      const status = await apiGet<StreamHlsPrecacheStatus>(`/api/streams/${streamId}/hls/precache`);
-      setStreamHlsPrecacheStatus((prev) => ({ ...prev, [streamId]: status }));
-      if (status.isComplete) {
-        setWatchedHlsPrecacheStreamIds((prev) => prev.filter((id) => id !== streamId));
-      }
-    } catch {
-      // ignore background status fetch failures
-    }
-  };
-
-  useEffect(() => {
-    if (!canUseApi) return;
-    if (!pathname.startsWith("/streams")) return;
-
-    const pollIds = Array.from(
-      new Set<number>([...expandedStreamIds, ...watchedHlsPrecacheStreamIds])
-    );
-    if (pollIds.length === 0) return;
-
-    let cancelled = false;
-    const poll = async () => {
-      await Promise.all(
-        pollIds.map(async (streamId) => {
-          if (cancelled) return;
-          await fetchStreamHlsPrecacheStatus(streamId);
-        })
-      );
-    };
-
-    void poll();
-    const interval = window.setInterval(() => {
-      void poll();
-    }, 2500);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [apiGet, canUseApi, expandedStreamIds, pathname, watchedHlsPrecacheStreamIds]);
-
-  useEffect(() => {
-    persistWatchedHlsPrecacheStreamIds(watchedHlsPrecacheStreamIds);
-  }, [watchedHlsPrecacheStreamIds]);
-
   const toggleStreamMenu = (streamId: number) => {
     setStreamMenuId((prev) => (prev === streamId ? null : streamId));
   };
 
-  type StreamHlsUrlMode = "live" | "cached" | "radio";
-
   const buildStreamHlsUrl = (
     streamId: number,
-    baseUrl: string,
-    mode: StreamHlsUrlMode = "live"
+    baseUrl: string
   ) => {
     const token = streamSettings?.token || streamToken;
     if (!token) return "";
-    const playlistPath =
-      mode === "live" ? "live.m3u8" : mode === "radio" ? "radio.m3u8" : "playlist.m3u8";
-    return `${baseUrl}/api/streams/${streamId}/hls/${playlistPath}?token=${encodeURIComponent(token)}`;
+    return `${baseUrl}/api/streams/${streamId}/hls/radio.m3u8?token=${encodeURIComponent(token)}`;
   };
 
-  const streamLiveUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl, "live");
-  const streamCachedUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl, "cached");
-
-  // "Radio style" playback: prefer cached playlist if we know it's complete, otherwise fall back to live.
-  const streamRadioUrl = (streamId: number) => {
-    const status = streamHlsPrecacheStatus[streamId];
-    if (status?.isComplete) {
-      const cached = streamCachedUrl(streamId);
-      if (cached) return cached;
-    }
-    return streamLiveUrl(streamId);
-  };
+  const streamLiveUrl = (streamId: number) => buildStreamHlsUrl(streamId, apiBaseUrl);
 
   const shareableStreamUrl = (streamId: number) => {
     const base = generalPublicApiBaseUrl.trim() || generalDomain.trim() || apiBaseUrl;
-    return buildStreamHlsUrl(streamId, base, "radio");
+    return buildStreamHlsUrl(streamId, base);
   };
 
   const escapeM3uValue = (value: string) => value.replace(/[\r\n]+/g, " ").replace(/\"/g, "'").trim();
@@ -622,7 +510,7 @@ export function useStreamsFeature({
     });
     const lines = sortedStreams
       .map((stream) => {
-        const url = buildStreamHlsUrl(stream.id, base, "radio");
+        const url = buildStreamHlsUrl(stream.id, base);
         if (!url) return null;
         const safeName = escapeM3uValue(stream.name || `Stream ${stream.id}`);
         const tags = [
@@ -651,41 +539,6 @@ export function useStreamsFeature({
     link.click();
     link.remove();
     window.URL.revokeObjectURL(url);
-  };
-
-  const precacheStreamHls = async (streamId: number, options?: { force?: boolean }) => {
-    if (!canUseApi) return;
-    setError(null);
-    setWatchedHlsPrecacheStreamIds((prev) => (prev.includes(streamId) ? prev : [...prev, streamId]));
-    try {
-      await apiPost<{ streamId: number; queued: number; force: boolean }>(
-        `/api/streams/${streamId}/hls/precache`,
-        {
-          force: options?.force ?? true
-        }
-      );
-      void fetchStreamHlsPrecacheStatus(streamId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to pre-encode HLS cache");
-    }
-  };
-
-  const cancelStreamHlsPrecache = async (streamId: number, options?: { abortActive?: boolean }) => {
-    if (!canUseApi) return;
-    if (cancellingStreamHlsPrecacheIds.includes(streamId)) return;
-    setCancellingStreamHlsPrecacheIds((prev) => [...prev, streamId]);
-    setError(null);
-    try {
-      await apiPost<{ streamId: number; tracks: number; removed: number; abortActive: boolean }>(
-        `/api/streams/${streamId}/hls/precache/cancel`,
-        { abortActive: options?.abortActive ?? true }
-      );
-      void fetchStreamHlsPrecacheStatus(streamId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to cancel HLS cache encoding");
-    } finally {
-      setCancellingStreamHlsPrecacheIds((prev) => prev.filter((id) => id !== streamId));
-    }
   };
 
   const createStream = async () => {
@@ -741,15 +594,10 @@ export function useStreamsFeature({
       const created = await apiPost<StreamSummary>("/api/streams", {
         ...payload
       });
-      if (streamPrecacheHls) {
-        // Run in the background; it can take a while on large streams.
-        void precacheStreamHls(created.id, { force: true });
-      }
       setStreamName("");
       setStreamIcon("");
       setStreamShuffle(false);
       setStreamEncoding("original");
-      setStreamPrecacheHls(true);
       setStreamArtistIds([]);
       setStreamGenreIds([]);
       setStreamArtistQuery("");
@@ -774,7 +622,6 @@ export function useStreamsFeature({
     setEditingStreamShuffle(stream.shuffle);
     setEditingStreamStatus(stream.status);
     setEditingStreamRestartOnSave(stream.status === "active");
-    setEditingStreamPrecacheHls(false);
     const artistIds = new Set<number>();
     for (const item of stream.items) {
       if (!item.artist_name) continue;
@@ -810,7 +657,6 @@ export function useStreamsFeature({
     setEditingStreamShuffle(false);
     setEditingStreamStatus("active");
     setEditingStreamRestartOnSave(true);
-    setEditingStreamPrecacheHls(false);
     setEditingStreamTab("artists");
     setEditingStreamTracks([]);
     setEditingStreamSelectedIds([]);
@@ -867,9 +713,6 @@ export function useStreamsFeature({
         setError(message);
       }
     }
-    if (editingStreamPrecacheHls) {
-      void precacheStreamHls(streamId, { force: true });
-    }
     await loadStreams();
     cancelEditStream();
   };
@@ -897,9 +740,6 @@ export function useStreamsFeature({
       const result = await apiPost<StreamSummary>(`/api/streams/${streamId}/rescan`, payload);
       updateEditingStreamTracks(result);
       await loadStreams();
-      if (editingStreamId === streamId && editingStreamPrecacheHls) {
-        void precacheStreamHls(streamId, { force: true });
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to rescan stream");
     } finally {
@@ -939,7 +779,6 @@ export function useStreamsFeature({
   };
 
   const openStreamPlayer = (streamId: number) => {
-    void fetchStreamHlsPrecacheStatus(streamId);
     setPlayingStreamId(streamId);
     setStreamPlayerNotice(null);
   };
@@ -962,15 +801,14 @@ export function useStreamsFeature({
   const playingStreamReloadKey = useMemo(() => {
     if (!playingStream) return null;
     const token = streamSettings?.token || streamToken || "";
-    const cacheComplete = streamHlsPrecacheStatus[playingStream.id]?.isComplete ? "cached" : "live";
-    return `${playingStream.id}:${playingStream.status}:${playingStream.encoding}:${token}:${cacheComplete}`;
-  }, [playingStream, streamHlsPrecacheStatus, streamSettings?.token, streamToken]);
+    return `${playingStream.id}:${playingStream.status}:${playingStream.encoding}:${token}`;
+  }, [playingStream, streamSettings?.token, streamToken]);
 
   useStreamHlsPlayback({
     playingStreamId,
     playingStream,
     streamPlayerRef,
-    streamHlsUrl: streamRadioUrl,
+    streamHlsUrl: streamLiveUrl,
     reloadKey: playingStreamReloadKey,
     setStreamPlayerNotice
   });
@@ -1029,8 +867,6 @@ export function useStreamsFeature({
     setStreamEncoding,
     streamShuffle,
     setStreamShuffle,
-    streamPrecacheHls,
-    setStreamPrecacheHls,
     streamSource,
     setStreamSource,
     streamTrackQuery,
@@ -1057,9 +893,6 @@ export function useStreamsFeature({
     // List
     expandedStreamIds,
     toggleStreamExpanded,
-    streamHlsPrecacheStatus,
-    cancellingStreamHlsPrecacheIds,
-    watchedHlsPrecacheStreamIds,
     streamMenuId,
     setStreamMenuId,
     streamMenuRef,
@@ -1072,11 +905,9 @@ export function useStreamsFeature({
     restartingStreamIds,
     rescanningStreamIds,
     streamLiveUrl,
-    streamCachedUrl,
     shareableStreamUrl,
     runStreamAction,
     rescanStream,
-    cancelStreamHlsPrecache,
     deleteStream,
     setConnectionsModalStreamId,
     editingStreamName,
@@ -1089,8 +920,6 @@ export function useStreamsFeature({
     setEditingStreamShuffle,
     editingStreamRestartOnSave,
     setEditingStreamRestartOnSave,
-    editingStreamPrecacheHls,
-    setEditingStreamPrecacheHls,
     editingStreamStatus,
     setEditingStreamStatus,
     editingStreamTab,
@@ -1115,7 +944,6 @@ export function useStreamsFeature({
     removeEditingStreamTrack,
     rescanEditingStream,
     saveStreamEdits,
-    precacheStreamHls,
     connectionsModalStream,
 
     // Player

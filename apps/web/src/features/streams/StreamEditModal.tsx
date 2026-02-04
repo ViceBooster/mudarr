@@ -32,8 +32,6 @@ type StreamEditModalProps<
   setEditingStreamShuffle: React.Dispatch<React.SetStateAction<boolean>>;
   editingStreamRestartOnSave: boolean;
   setEditingStreamRestartOnSave: React.Dispatch<React.SetStateAction<boolean>>;
-  editingStreamPrecacheHls: boolean;
-  setEditingStreamPrecacheHls: React.Dispatch<React.SetStateAction<boolean>>;
   editingStreamStatus: TStatus;
   setEditingStreamStatus: React.Dispatch<React.SetStateAction<TStatus>>;
 
@@ -95,8 +93,6 @@ export function StreamEditModal<
   setEditingStreamShuffle,
   editingStreamRestartOnSave,
   setEditingStreamRestartOnSave,
-  editingStreamPrecacheHls,
-  setEditingStreamPrecacheHls,
   editingStreamStatus,
   setEditingStreamStatus,
   editingStreamTab,
@@ -197,21 +193,6 @@ export function StreamEditModal<
               <option value={"stopped" as TStatus}>Status: stopped</option>
             </select>
           </div>
-
-          <label className="flex items-start gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-700">
-            <input
-              type="checkbox"
-              checked={editingStreamPrecacheHls}
-              onChange={(event) => setEditingStreamPrecacheHls(event.currentTarget.checked)}
-              className="mt-0.5 h-4 w-4"
-            />
-            <span className="space-y-0.5">
-              <span className="block font-semibold">Pre-encode for HLS Cached</span>
-              <span className="block text-[10px] text-slate-500">
-                Rebuilds the cached HLS segments for this stream after save/rescan (more reliable than live concat).
-              </span>
-            </span>
-          </label>
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setEditingStreamTab("artists")}

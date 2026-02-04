@@ -12,8 +12,6 @@ import { getMediaInfo } from "../services/media.js";
 import { recordStreamBandwidth } from "../services/streamMetrics.js";
 import { getStreamToken } from "../services/streams.js";
 import { requireStreamToken } from "../services/streamAuth.js";
-import hlsControlQueue from "../queue/hlsControlQueue.js";
-import hlsQueue from "../queue/hlsQueue.js";
 
 const router = Router();
 
@@ -46,16 +44,6 @@ const updateStreamItemsSchema = z.object({
 
 const rescanStreamSchema = z.object({
   artistIds: z.array(z.number().int()).optional()
-});
-
-const precacheStreamHlsSchema = z.object({
-  force: z.boolean().optional(),
-  trackIds: z.array(z.number().int()).optional()
-});
-
-const cancelPrecacheStreamHlsSchema = z.object({
-  trackIds: z.array(z.number().int()).optional(),
-  abortActive: z.boolean().optional()
 });
 
 const streamActionSchema = z.object({
@@ -147,369 +135,6 @@ const hlsRestreamWindowSeconds = 1800;
 const hlsForceKeyFrameExpr = `expr:gte(t,n_forced*${hlsSegmentDurationSeconds})`;
 const hlsFlags =
   "delete_segments+append_list+omit_endlist+independent_segments+program_date_time+temp_file+discont_start";
-const hlsCacheDirName = ".mudarr-hls";
-
-type TrackHlsSegment = {
-  duration: number;
-  uri: string;
-};
-
-type TrackHlsPlaylist = {
-  targetDuration: number;
-  mapLine: string | null;
-  segments: TrackHlsSegment[];
-};
-
-const getTrackHlsDir = (filePath: string, trackId: number) =>
-  path.join(path.dirname(filePath), hlsCacheDirName, `track-${trackId}`);
-
-const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
-  if (!Number.isFinite(ms) || ms <= 0) {
-    return promise;
-  }
-  return await new Promise<T>((resolve, reject) => {
-    let done = false;
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      reject(new Error(`${label} timed out after ${ms}ms`));
-    }, ms);
-    promise.then(
-      (value) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        reject(error);
-      }
-    );
-  });
-};
-
-const normalizePositiveInt = (value: unknown) => {
-  const parsed = typeof value === "string" ? Number(value) : Number(value);
-  if (!Number.isFinite(parsed)) return null;
-  const rounded = Math.floor(parsed);
-  if (rounded < 1) return null;
-  return rounded;
-};
-
-const mapWithConcurrency = async <T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T, index: number) => Promise<R>
-): Promise<R[]> => {
-  const concurrency = Math.max(1, Math.min(Math.floor(limit) || 1, items.length));
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  const runNext = async (): Promise<void> => {
-    const index = nextIndex;
-    nextIndex += 1;
-    if (index >= items.length) return;
-    results[index] = await mapper(items[index] as T, index);
-    await runNext();
-  };
-  await Promise.all(Array.from({ length: concurrency }, () => runNext()));
-  return results;
-};
-
-const hlsQueueAddTimeoutMsRaw = Number(process.env.HLS_QUEUE_ADD_TIMEOUT_MS ?? 2000);
-const hlsQueueAddTimeoutMs =
-  Number.isFinite(hlsQueueAddTimeoutMsRaw) && hlsQueueAddTimeoutMsRaw > 0
-    ? Math.floor(hlsQueueAddTimeoutMsRaw)
-    : 2000;
-
-const clearTrackHlsCache = async (filePath: string, trackId: number) => {
-  const dir = getTrackHlsDir(filePath, trackId);
-  try {
-    await fsPromises.rm(dir, { recursive: true, force: true });
-  } catch {
-    // ignore
-  }
-};
-
-const warmMissingTrackHlsCache = async (
-  items: Array<{ file_path: string; track_id: number }>,
-  options?: { reason?: string }
-) => {
-  const concurrency = normalizePositiveInt(process.env.HLS_WARM_MISSING_CONCURRENCY) ?? 8;
-  const reason = options?.reason ? ` (${options.reason})` : "";
-  await mapWithConcurrency(items, concurrency, async (item) => {
-    try {
-      const parsed = await readTrackHlsPlaylist(item.file_path, item.track_id);
-      if (parsed) {
-        return;
-      }
-      await queueHlsSegmentJob(item.track_id, item.file_path);
-    } catch (error) {
-      console.warn(`Failed to warm missing HLS cache for track ${item.track_id}${reason}`, error);
-    }
-  });
-};
-
-const queueHlsSegmentJob = async (trackId: number, filePath: string) => {
-  try {
-    await withTimeout(
-      hlsQueue.add(
-        "hls-segment",
-        { trackId, filePath },
-        { jobId: `hls-segment-${trackId}`, removeOnComplete: true, removeOnFail: 25 }
-      ),
-      hlsQueueAddTimeoutMs,
-      `queue hls-segment for track ${trackId}`
-    );
-  } catch (error) {
-    console.warn(`Failed to queue HLS segment job for track ${trackId}`, error);
-  }
-};
-
-const parseTrackHlsPlaylist = (body: string): TrackHlsPlaylist | null => {
-  const lines = body.split(/\r?\n/);
-  let targetDuration = 0;
-  let mapLine: string | null = null;
-  const segments: TrackHlsSegment[] = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]?.trim();
-    if (!line) continue;
-    if (line.startsWith("#EXT-X-TARGETDURATION:")) {
-      const value = Number.parseFloat(line.slice("#EXT-X-TARGETDURATION:".length));
-      if (Number.isFinite(value)) {
-        targetDuration = value;
-      }
-      continue;
-    }
-    if (line.startsWith("#EXT-X-MAP:")) {
-      mapLine = line;
-      continue;
-    }
-    if (line.startsWith("#EXTINF:")) {
-      const durationText = line.slice("#EXTINF:".length).split(",")[0] ?? "";
-      const duration = Number.parseFloat(durationText);
-      let uri = "";
-      for (let j = i + 1; j < lines.length; j += 1) {
-        const next = lines[j]?.trim();
-        if (!next) continue;
-        if (next.startsWith("#")) continue;
-        uri = next;
-        i = j;
-        break;
-      }
-      if (uri) {
-        segments.push({
-          duration: Number.isFinite(duration) ? duration : hlsSegmentDurationSeconds,
-          uri: path.basename(uri)
-        });
-      }
-    }
-  }
-  if (segments.length === 0) {
-    return null;
-  }
-  return {
-    targetDuration: targetDuration > 0 ? targetDuration : hlsSegmentDurationSeconds,
-    mapLine,
-    segments
-  };
-};
-
-const readTrackHlsPlaylist = async (filePath: string, trackId: number) => {
-  const dir = getTrackHlsDir(filePath, trackId);
-  const playlistPath = path.join(dir, "playlist.m3u8");
-  try {
-    await fsPromises.stat(playlistPath);
-  } catch {
-    return null;
-  }
-  try {
-    const body = await fsPromises.readFile(playlistPath, "utf8");
-    const parsed = parseTrackHlsPlaylist(body);
-    if (!parsed) {
-      return null;
-    }
-    if (parsed.mapLine) {
-      try {
-        await fsPromises.stat(path.join(dir, "init.mp4"));
-      } catch {
-        return null;
-      }
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-};
-
-type CachedPlaylistResult = {
-  playlist: string | null;
-  missing: Array<{ track_id: number; file_path: string }>;
-  isComplete: boolean;
-};
-
-const buildCachedHlsPlaylist = async (
-  items: Array<{ track_id: number; file_path: string; artist_name: string | null; title: string }>,
-  baseUrl: string,
-  token: string,
-  elapsedSeconds: number | null
-) : Promise<CachedPlaylistResult> => {
-  if (items.length === 0) {
-    return { playlist: null, missing: [], isComplete: false };
-  }
-  const tokenParam = encodeURIComponent(token);
-  const segmentUrl = (trackId: number, segment: string, cacheBuster?: string) => {
-    const url = `${baseUrl}/api/tracks/${trackId}/hls/${encodeURIComponent(segment)}?token=${tokenParam}`;
-    return cacheBuster ? `${url}&v=${encodeURIComponent(cacheBuster)}` : url;
-  };
-  type SegmentEntry = {
-    duration: number;
-    uri: string;
-    trackId: number;
-    mapLine: string | null;
-  };
-  let maxTargetDuration = hlsSegmentDurationSeconds;
-  let totalDurationSeconds = 0;
-  const segments: SegmentEntry[] = [];
-  const missing: Array<{ track_id: number; file_path: string }> = [];
-  for (const item of items) {
-    const parsed = await readTrackHlsPlaylist(item.file_path, item.track_id);
-    if (!parsed) {
-      missing.push({ track_id: item.track_id, file_path: item.file_path });
-      continue;
-    }
-    maxTargetDuration = Math.max(maxTargetDuration, parsed.targetDuration);
-    // Keep the original map line as a template; we rewrite the URI when rendering
-    // so we can include stable cache-busting params for strict HLS clients.
-    const mapLine = parsed.mapLine ?? null;
-    for (const segment of parsed.segments) {
-      totalDurationSeconds += segment.duration;
-      segments.push({
-        duration: segment.duration,
-        uri: segment.uri,
-        trackId: item.track_id,
-        mapLine
-      });
-    }
-  }
-  if (segments.length === 0) {
-    return { playlist: null, missing, isComplete: false };
-  }
-  const isLive = typeof elapsedSeconds === "number";
-  let windowStartIndex = 0;
-  let windowEndIndex = segments.length;
-  let loopIndex = 0;
-  let endOffsetSeconds = 0;
-  if (totalDurationSeconds > 0 && isLive) {
-    loopIndex = Math.floor(elapsedSeconds / totalDurationSeconds);
-    endOffsetSeconds = Math.max(0, elapsedSeconds % totalDurationSeconds);
-    const windowStartOffset = Math.max(0, endOffsetSeconds - hlsRestreamWindowSeconds);
-    let cursor = 0;
-    for (let i = 0; i < segments.length; i += 1) {
-      const next = cursor + segments[i].duration;
-      if (windowStartOffset < next) {
-        windowStartIndex = i;
-        break;
-      }
-      cursor = next;
-    }
-    cursor = 0;
-    for (let i = 0; i < segments.length; i += 1) {
-      const next = cursor + segments[i].duration;
-      if (endOffsetSeconds <= next) {
-        windowEndIndex = i + 1;
-        break;
-      }
-      cursor = next;
-    }
-    if (windowEndIndex <= windowStartIndex) {
-      windowEndIndex = Math.min(windowStartIndex + 1, segments.length);
-    }
-  }
-  const bodyLines: string[] = [];
-  let lastTrackId: number | null = null;
-  let discontinuitySequence = 0;
-  let preStartLastTrackId: number | null = null;
-
-  // For "live looping" we must keep MEDIA-SEQUENCE monotonic; otherwise many
-  // third-party HLS ingest clients will drop when the sequence jumps backward.
-  // We compute a virtual global sequence based on completed loops.
-  const mediaSequence = isLive ? loopIndex * segments.length + windowStartIndex : windowStartIndex;
-
-  // Discontinuity sequence should also be monotonic when looping.
-  // Count discontinuities in a full loop (track changes between consecutive segments).
-  let fullLoopDiscontinuities = 0;
-  for (let i = 1; i < segments.length; i += 1) {
-    if (segments[i].trackId !== segments[i - 1].trackId) {
-      fullLoopDiscontinuities += 1;
-    }
-  }
-  // Add one discontinuity per loop for the wrap-around from end -> start.
-  const baseLoopDiscontinuities = isLive && loopIndex > 0 ? loopIndex * (fullLoopDiscontinuities + 1) : 0;
-
-  for (let i = 0; i < windowStartIndex; i += 1) {
-    const trackId = segments[i]?.trackId ?? null;
-    if (trackId === null) continue;
-    if (preStartLastTrackId !== null && trackId !== preStartLastTrackId) {
-      discontinuitySequence += 1;
-    }
-    preStartLastTrackId = trackId;
-  }
-  discontinuitySequence += baseLoopDiscontinuities;
-
-  // If we are right after a wrap-around, explicitly mark a discontinuity once
-  // so strict HLS clients don't assume continuity across loops.
-  if (isLive && loopIndex > 0 && windowStartIndex === 0 && endOffsetSeconds < hlsPlaylistWindowSeconds) {
-    bodyLines.push("#EXT-X-DISCONTINUITY");
-  }
-
-  for (let i = windowStartIndex; i < windowEndIndex; i += 1) {
-    const segment = segments[i];
-    if (lastTrackId !== segment.trackId) {
-      if (lastTrackId !== null) {
-        bodyLines.push("#EXT-X-DISCONTINUITY");
-      }
-      if (segment.mapLine) {
-        const mapCacheBuster = isLive ? `init-${segment.trackId}-${loopIndex}` : undefined;
-        const rewrittenMap = segment.mapLine.replace(
-          /URI="[^"]*"/,
-          `URI="${segmentUrl(segment.trackId, "init.mp4", mapCacheBuster)}"`
-        );
-        bodyLines.push(rewrittenMap);
-      }
-      lastTrackId = segment.trackId;
-    }
-    bodyLines.push(`#EXTINF:${segment.duration.toFixed(3)},`);
-    const globalSeq = mediaSequence + (i - windowStartIndex);
-    const segCacheBuster = isLive ? `seg-${globalSeq}` : undefined;
-    bodyLines.push(segmentUrl(segment.trackId, segment.uri, segCacheBuster));
-  }
-  const header = [
-    "#EXTM3U",
-    "#EXT-X-VERSION:7",
-    `#EXT-X-TARGETDURATION:${Math.ceil(maxTargetDuration)}`,
-    "#EXT-X-INDEPENDENT-SEGMENTS",
-    `#EXT-X-MEDIA-SEQUENCE:${mediaSequence}`
-  ];
-  if (discontinuitySequence > 0) {
-    header.push(`#EXT-X-DISCONTINUITY-SEQUENCE:${discontinuitySequence}`);
-  }
-  if (!isLive && missing.length === 0) {
-    header.push("#EXT-X-PLAYLIST-TYPE:VOD");
-    return {
-      playlist: [...header, ...bodyLines, "#EXT-X-ENDLIST"].join("\n"),
-      missing,
-      isComplete: true
-    };
-  }
-  return {
-    playlist: [...header, ...bodyLines].join("\n"),
-    missing,
-    isComplete: false
-  };
-};
 const getStreamPidPath = (streamId: number) => path.join(hlsRootDir, `stream-${streamId}.pid`);
 
 type StreamPidInfo = {
@@ -1188,83 +813,109 @@ const findNextSegmentIndex = async (dir: string, fallback: number) => {
   }
 };
 
+type TrackCompatSignature = {
+  hasVideo: boolean;
+  hasAudio: boolean;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  videoWidth: number | null;
+  videoHeight: number | null;
+  pixelFormat: string | null;
+  audioSampleRate: number | null;
+  audioChannels: number | null;
+};
+
+const normalizeNumber = (value: unknown) => {
+  const parsed = typeof value === "string" ? Number(value) : Number(value);
+  return Number.isFinite(parsed) ? Math.floor(parsed) : null;
+};
+
+const probeTrackSignature = async (filePath: string): Promise<TrackCompatSignature | null> => {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,codec_name,sample_rate,channels,width,height,pix_fmt",
+        "-of",
+        "json",
+        filePath
+      ],
+      { maxBuffer: 512 * 1024, timeout: 3000 }
+    );
+    const parsed = JSON.parse(stdout || "{}") as {
+      streams?: Array<{
+        codec_type?: string;
+        codec_name?: string;
+        sample_rate?: string | number;
+        channels?: number;
+        width?: number;
+        height?: number;
+        pix_fmt?: string;
+      }>;
+    };
+    const streams = parsed.streams ?? [];
+    const video = streams.find((stream) => stream.codec_type === "video") ?? null;
+    const audio = streams.find((stream) => stream.codec_type === "audio") ?? null;
+    return {
+      hasVideo: Boolean(video),
+      hasAudio: Boolean(audio),
+      videoCodec: typeof video?.codec_name === "string" ? video.codec_name : null,
+      audioCodec: typeof audio?.codec_name === "string" ? audio.codec_name : null,
+      videoWidth: normalizeNumber(video?.width),
+      videoHeight: normalizeNumber(video?.height),
+      pixelFormat: typeof video?.pix_fmt === "string" ? video.pix_fmt : null,
+      audioSampleRate: normalizeNumber(audio?.sample_rate),
+      audioChannels: normalizeNumber(audio?.channels)
+    };
+  } catch (error) {
+    console.warn(
+      `Stream codec check: ffprobe failed for ${filePath}; falling back to transcode`,
+      error
+    );
+    return null;
+  }
+};
+
+const matchesSignature = (base: TrackCompatSignature, next: TrackCompatSignature) =>
+  base.hasVideo === next.hasVideo &&
+  base.hasAudio === next.hasAudio &&
+  base.videoCodec === next.videoCodec &&
+  base.audioCodec === next.audioCodec &&
+  base.videoWidth === next.videoWidth &&
+  base.videoHeight === next.videoHeight &&
+  base.pixelFormat === next.pixelFormat &&
+  base.audioSampleRate === next.audioSampleRate &&
+  base.audioChannels === next.audioChannels;
+
 /**
- * Check if all tracks have compatible H.264/AAC codecs for copy mode
+ * Check if all tracks have compatible H.264/AAC + consistent parameters for copy mode.
+ * Copy mode cannot handle per-track codec/parameter changes.
  */
 const checkTracksCodecCompatibility = async (
   items: Array<{ file_path: string }>
 ): Promise<boolean> => {
   if (items.length === 0) return false;
-  
-  try {
-    // Check first few files to see if they're all H.264/AAC
-    const samplesToCheck = Math.min(3, items.length);
-    const checks = await Promise.all(
-      items.slice(0, samplesToCheck).map(async (item) => {
-        return new Promise<boolean>((resolve) => {
-          let resolved = false;
-          const finish = (value: boolean) => {
-            if (resolved) return;
-            resolved = true;
-            resolve(value);
-          };
-          const timeout = setTimeout(() => {
-            console.warn(
-              `Stream codec check: ffprobe timed out for ${item.file_path}; falling back to transcode`
-            );
-            finish(false);
-          }, 3000);
-          const ffprobe = spawn("ffprobe", [
-            "-v",
-            "error",
-            "-show_entries",
-            "stream=codec_type,codec_name",
-            "-of",
-            "json",
-            item.file_path
-          ]);
-          
-          let output = "";
-          if (ffprobe.stdout) {
-            ffprobe.stdout.on("data", (chunk) => {
-              output += chunk.toString();
-            });
-          }
-          
-          ffprobe.on("error", (error) => {
-            clearTimeout(timeout);
-            console.warn(
-              `Stream codec check: ffprobe failed for ${item.file_path}; falling back to transcode`,
-              error
-            );
-            finish(false);
-          });
-          
-          ffprobe.on("close", () => {
-            clearTimeout(timeout);
-            try {
-              const result = JSON.parse(output);
-              const streams = result.streams || [];
-              const videoCodec = streams.find((s: any) => s.codec_type === "video")?.codec_name;
-              const audioCodec = streams.find((s: any) => s.codec_type === "audio")?.codec_name;
-
-              // Check if video is H.264 and audio is AAC
-              const compatible =
-                (videoCodec ? videoCodec === "h264" : true) &&
-                (audioCodec ? audioCodec === "aac" : true);
-              finish(compatible);
-            } catch {
-              finish(false);
-            }
-          });
-        });
-      })
-    );
-    
-    return checks.every((compatible) => compatible);
-  } catch {
-    return false;
+  const first = await probeTrackSignature(items[0].file_path);
+  if (!first) return false;
+  if (first.videoCodec && first.videoCodec !== "h264") return false;
+  if (first.audioCodec && first.audioCodec !== "aac") return false;
+  for (let index = 1; index < items.length; index += 1) {
+    const signature = await probeTrackSignature(items[index].file_path);
+    if (!signature) return false;
+    if (signature.videoCodec && signature.videoCodec !== "h264") return false;
+    if (signature.audioCodec && signature.audioCodec !== "aac") return false;
+    if (!matchesSignature(first, signature)) {
+      console.warn(
+        `Stream codec check: incompatible track parameters detected at ${items[index].file_path}; ` +
+          "falling back to transcode"
+      );
+      return false;
+    }
   }
+  return true;
 };
 
 const resolveHlsEncoding = async (
@@ -1298,7 +949,7 @@ const runHlsConcatenated = async (
   console.log(`Stream ${session.dir}: Concat file has ${items.length} items`);
   console.log(`Stream ${session.dir}: First 500 chars of concat:\n${concatBody.substring(0, 500)}`);
   
-  // All downloads are H.264/AAC MP4, so copy mode is safe for original/copy
+  // Copy mode is only safe when all tracks share the same codecs and parameters.
   let actualEncoding = encoding;
   if (encoding === "original" || encoding === "copy") {
     actualEncoding = "copy";
@@ -1692,22 +1343,6 @@ const waitForHlsPlaylistReady = async (
       }
     } catch {
       // ignore and retry
-    }
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
-  return false;
-};
-
-const waitForTrackHlsReady = async (
-  filePath: string,
-  trackId: number,
-  timeoutMs = 8000
-) => {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const parsed = await readTrackHlsPlaylist(filePath, trackId);
-    if (parsed) {
-      return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
@@ -2173,8 +1808,6 @@ router.patch("/:id", async (req, res) => {
     if (availableItems.length > 0) {
       // Start live HLS immediately; cache/queue work should not block the stream from starting.
       await ensureHlsSession(stream, availableItems);
-      // Warm missing cached-HLS tracks in the background; do NOT clear existing caches on start.
-      void warmMissingTrackHlsCache(availableItems, { reason: "update:status-active" });
     }
   }
   const payload = await buildStreamResponse(stream);
@@ -2305,8 +1938,6 @@ router.post("/:id/actions", async (req, res) => {
     }
     if (availableItems.length > 0) {
       await ensureHlsSession(stream, availableItems);
-      // Warm missing cached-HLS tracks in the background; do NOT clear existing caches on start.
-      void warmMissingTrackHlsCache(availableItems, { reason: `action:${action}` });
     }
   }
   const payload = await buildStreamResponse(stream);
@@ -2375,191 +2006,9 @@ router.post("/:id/rescan", async (req, res) => {
   }>;
   if (availableItems.length > 0) {
     await ensureHlsSession(stream, availableItems);
-    // Warm missing cached-HLS tracks in the background; do NOT clear existing caches on rescan.
-    void warmMissingTrackHlsCache(availableItems, { reason: "rescan" });
   }
   const payload = await buildStreamResponse(stream);
   res.json(payload);
-});
-
-// Queue (and optionally force re-run) per-track HLS segmentation for a stream.
-// This is intended for the "cached" HLS playlist flow (/:id/hls/playlist.m3u8).
-router.post("/:id/hls/precache", async (req, res) => {
-  const id = Number(req.params.id);
-  if (Number.isNaN(id)) {
-    return res.status(400).json({ error: "Invalid stream id" });
-  }
-  const parsed = precacheStreamHlsSchema.safeParse(req.body ?? {});
-  if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.flatten() });
-  }
-
-  const stream = await loadStream(id);
-  if (!stream) {
-    return res.status(404).json({ error: "Stream not found" });
-  }
-
-  const items = await loadStreamItems(id);
-  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
-    file_path: string;
-    artist_name: string | null;
-    track_id: number;
-  }>;
-  if (availableItems.length === 0) {
-    return res.status(404).json({ error: "No playable tracks in this stream" });
-  }
-
-  const trackFilter = parsed.data.trackIds ? new Set(parsed.data.trackIds) : null;
-  const filtered = trackFilter
-    ? availableItems.filter((item) => trackFilter.has(item.track_id))
-    : availableItems;
-
-  const force = parsed.data.force ?? false;
-  if (force) {
-    const clearConcurrency =
-      normalizePositiveInt(process.env.HLS_PRECACHE_CLEAR_CONCURRENCY) ?? 4;
-    await mapWithConcurrency(filtered, clearConcurrency, async (item) => {
-      await clearTrackHlsCache(item.file_path, item.track_id);
-    });
-  }
-
-  const queueConcurrency =
-    normalizePositiveInt(process.env.HLS_PRECACHE_QUEUE_CONCURRENCY) ?? 6;
-  await mapWithConcurrency(filtered, queueConcurrency, async (item) => {
-    await queueHlsSegmentJob(item.track_id, item.file_path);
-  });
-
-  res.json({
-    streamId: id,
-    queued: filtered.length,
-    force
-  });
-});
-
-// Return current cached-HLS precache progress for a stream.
-router.get("/:id/hls/precache", async (req, res) => {
-  const id = Number(req.params.id);
-  if (Number.isNaN(id)) {
-    return res.status(400).json({ error: "Invalid stream id" });
-  }
-
-  const stream = await loadStream(id);
-  if (!stream) {
-    return res.status(404).json({ error: "Stream not found" });
-  }
-
-  const items = await loadStreamItems(id);
-  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
-    file_path: string;
-    track_id: number;
-  }>;
-
-  const total = availableItems.length;
-  if (total === 0) {
-    return res.json({
-      streamId: id,
-      total: 0,
-      cached: 0,
-      missing: 0,
-      percent: 0,
-      isComplete: true
-    });
-  }
-
-  const statConcurrency = normalizePositiveInt(process.env.HLS_STATUS_CONCURRENCY) ?? 8;
-  const checks = await mapWithConcurrency(availableItems, statConcurrency, async (item) => {
-    const parsed = await readTrackHlsPlaylist(item.file_path, item.track_id);
-    return Boolean(parsed);
-  });
-
-  const cached = checks.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
-  const missing = Math.max(0, total - cached);
-  const percent = total > 0 ? Math.floor((cached / total) * 100) : 0;
-  res.json({
-    streamId: id,
-    total,
-    cached,
-    missing,
-    percent,
-    isComplete: cached >= total
-  });
-});
-
-// Cancel queued (and optionally active) HLS precache work for a stream.
-router.post("/:id/hls/precache/cancel", async (req, res) => {
-  const id = Number(req.params.id);
-  if (Number.isNaN(id)) {
-    return res.status(400).json({ error: "Invalid stream id" });
-  }
-  const parsed = cancelPrecacheStreamHlsSchema.safeParse(req.body ?? {});
-  if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.flatten() });
-  }
-
-  const stream = await loadStream(id);
-  if (!stream) {
-    return res.status(404).json({ error: "Stream not found" });
-  }
-
-  const items = await loadStreamItems(id);
-  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
-    file_path: string;
-    track_id: number;
-  }>;
-
-  const trackFilter = parsed.data.trackIds ? new Set(parsed.data.trackIds) : null;
-  const filtered = trackFilter
-    ? availableItems.filter((item) => trackFilter.has(item.track_id))
-    : availableItems;
-
-  const abortActive = parsed.data.abortActive ?? true;
-  const removeConcurrency = normalizePositiveInt(process.env.HLS_CANCEL_REMOVE_CONCURRENCY) ?? 12;
-
-  const removedFlags = await mapWithConcurrency(filtered, removeConcurrency, async (item) => {
-    const jobId = `hls-segment-${item.track_id}`;
-    try {
-      await hlsQueue.remove(jobId);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  const removed = removedFlags.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
-
-  if (abortActive) {
-    const queuedAbortFlags = await mapWithConcurrency(filtered, removeConcurrency, async (item) => {
-      try {
-        await hlsControlQueue.add(
-          "hls-cancel",
-          { trackId: item.track_id },
-          { jobId: `hls-cancel-${item.track_id}`, removeOnComplete: true, removeOnFail: 25 }
-        );
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    const abortQueued = queuedAbortFlags.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
-    await pool.query(
-      "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-      [
-        "hls_cache_cancelled",
-        `Cancelled HLS cache jobs for stream ${id}`,
-        { streamId: id, tracks: filtered.length, removed, abortActive, abortQueued }
-      ]
-    );
-    return res.json({ streamId: id, tracks: filtered.length, removed, abortActive, abortQueued });
-  }
-
-  await pool.query(
-    "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-    [
-      "hls_cache_cancelled",
-      `Cancelled HLS cache jobs for stream ${id}`,
-      { streamId: id, tracks: filtered.length, removed, abortActive }
-    ]
-  );
-  return res.json({ streamId: id, tracks: filtered.length, removed, abortActive });
 });
 
 router.delete("/:id", async (req, res) => {
@@ -2628,64 +2077,12 @@ router.get("/:id/hls/playlist.m3u8", async (req, res) => {
   if (stream.status !== "active") {
     return res.status(409).json({ error: "Stream is stopped" });
   }
-  registerStreamClient(id, req, { path: req.originalUrl ?? req.path });
-  const items = await loadStreamItems(id);
-  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
-    file_path: string;
-    artist_name: string | null;
-    track_id: number;
-    title: string;
-  }>;
-  if (availableItems.length === 0) {
-    return res.status(404).json({ error: "No downloadable tracks in this stream" });
-  }
-  const playback = buildStreamPlaybackPlan(stream, availableItems);
   const baseUrl = await getBaseUrl(req);
-  const elapsedSeconds = getStreamElapsedSeconds(stream);
-  const cachedResult = await buildCachedHlsPlaylist(
-    playback.ordered as Array<{
-      track_id: number;
-      file_path: string;
-      artist_name: string | null;
-      title: string;
-    }>,
-    baseUrl,
-    token,
-    elapsedSeconds
+  // Backward-compatible alias: cached playlist flow was removed; use radio instead.
+  return res.redirect(
+    302,
+    `${baseUrl}/api/streams/${id}/hls/radio.m3u8?token=${encodeURIComponent(token)}`
   );
-  if (cachedResult.playlist) {
-    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-    res.setHeader("Cache-Control", "no-store");
-    recordStreamBandwidth(Buffer.byteLength(cachedResult.playlist));
-    return res.send(cachedResult.playlist);
-  }
-  if (cachedResult.missing.length > 0) {
-    await Promise.all(
-      cachedResult.missing.map((item) => queueHlsSegmentJob(item.track_id, item.file_path))
-    );
-  }
-  if (playback.ordered.length > 0) {
-    const first = playback.ordered[0] as { track_id: number; file_path: string };
-    await waitForTrackHlsReady(first.file_path, first.track_id, 8000);
-    const retryResult = await buildCachedHlsPlaylist(
-      playback.ordered as Array<{
-        track_id: number;
-        file_path: string;
-        artist_name: string | null;
-        title: string;
-      }>,
-      baseUrl,
-      token,
-      elapsedSeconds
-    );
-    if (retryResult.playlist) {
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      res.setHeader("Cache-Control", "no-store");
-      recordStreamBandwidth(Buffer.byteLength(retryResult.playlist));
-      return res.send(retryResult.playlist);
-    }
-  }
-  return res.status(503).json({ error: "HLS cache not ready" });
 });
 
 // "Radio" HLS: restreamer-friendly live HLS playlist (single ffmpeg session).
@@ -2782,9 +2179,6 @@ router.get("/:id/hls/live.m3u8", async (req, res) => {
   if (!token) {
     return;
   }
-  const ip = getClientIp(req);
-  const userAgent = getClientUserAgent(req);
-  console.log(`Stream ${id}: live.m3u8 requested (ip=${ip}, ua=${userAgent ?? "unknown"})`);
   const stream = await loadStream(id);
   if (!stream) {
     return res.status(404).json({ error: "Stream not found" });
@@ -2792,69 +2186,12 @@ router.get("/:id/hls/live.m3u8", async (req, res) => {
   if (stream.status !== "active") {
     return res.status(409).json({ error: "Stream is stopped" });
   }
-  registerStreamClient(id, req, { path: req.originalUrl ?? req.path });
-  const items = await loadStreamItems(id);
-  const availableItems = items.filter((item) => isUsableMediaFile(item.file_path)) as Array<{
-    file_path: string;
-    artist_name: string | null;
-  }>;
-  if (availableItems.length === 0) {
-    return res.status(404).json({ error: "No downloadable tracks in this stream" });
-  }
-
-  const ensureStart = Date.now();
-  console.log(`Stream ${id}: ensuring HLS session (${availableItems.length} items)`);
-  const session = await ensureHlsSession(stream, availableItems);
-  console.log(
-    `Stream ${id}: ensureHlsSession completed in ${Date.now() - ensureStart}ms ` +
-      `(dir=${session.dir}, pid=${session.currentProcess?.pid ?? "none"})`
-  );
-  session.lastAccess = Date.now();
-  const ready = await waitForHlsPlaylistReady(session.dir, hlsLiveReadyTimeoutMs, 1);
-  if (!ready) {
-    const pid = session.currentProcess?.pid;
-    const uptime = getFfmpegUptimeSeconds(id);
-    console.warn(
-      `Stream ${id}: HLS session not ready after ${hlsLiveReadyTimeoutMs}ms ` +
-        `(pid=${typeof pid === "number" ? pid : "none"}, uptime=${uptime ?? "n/a"}s, dir=${session.dir})`
-    );
-    return res.status(503).json({ error: "HLS session not ready" });
-  }
-
-  const playlistPath = path.join(session.dir, "playlist.m3u8");
-  let body = "";
-  try {
-    body = await fsPromises.readFile(playlistPath, "utf8");
-    // Mark that we successfully read a new/updated playlist
-    session.lastPlaylistUpdate = Date.now();
-  } catch {
-    return res.status(503).json({ error: "HLS session not ready" });
-  }
-
   const baseUrl = await getBaseUrl(req);
-  const tokenParam = encodeURIComponent(token);
-  const segmentUrl = (segment: string) =>
-    `${baseUrl}/api/streams/${id}/hls/${encodeURIComponent(segment)}?token=${tokenParam}`;
-
-  const rewritten = body
-    .split(/\r?\n/)
-    .map((line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return line;
-      if (trimmed.startsWith("#EXT-X-MAP:")) {
-        return trimmed.replace(/URI="([^"]+)"/, (_match, uri) => `URI="${segmentUrl(uri)}"`);
-      }
-      if (trimmed.startsWith("#")) {
-        return trimmed;
-      }
-      return segmentUrl(trimmed);
-    })
-    .join("\n");
-
-  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-  res.setHeader("Cache-Control", "no-store");
-  recordStreamBandwidth(Buffer.byteLength(rewritten));
-  return res.send(rewritten);
+  // Backward-compatible alias: "live" is now the same as "radio".
+  return res.redirect(
+    302,
+    `${baseUrl}/api/streams/${id}/hls/radio.m3u8?token=${encodeURIComponent(token)}`
+  );
 });
 
 router.get("/:id/hls/:segment", async (req, res) => {

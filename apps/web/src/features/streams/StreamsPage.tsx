@@ -4,7 +4,6 @@ import type {
   Artist,
   Genre,
   StreamEncoding,
-  StreamHlsPrecacheStatus,
   StreamStatus,
   StreamSummary,
   StreamTrackOption
@@ -44,8 +43,6 @@ type StreamsPageProps = {
   setStreamEncoding: React.Dispatch<React.SetStateAction<StreamEncoding>>;
   streamShuffle: boolean;
   setStreamShuffle: React.Dispatch<React.SetStateAction<boolean>>;
-  streamPrecacheHls: boolean;
-  setStreamPrecacheHls: React.Dispatch<React.SetStateAction<boolean>>;
   streamSource: "manual" | "artists" | "genres";
   setStreamSource: React.Dispatch<React.SetStateAction<"manual" | "artists" | "genres">>;
 
@@ -77,9 +74,6 @@ type StreamsPageProps = {
   // Existing streams list UI
   expandedStreamIds: number[];
   toggleStreamExpanded: (streamId: number) => void;
-  streamHlsPrecacheStatus: Record<number, StreamHlsPrecacheStatus>;
-  cancellingStreamHlsPrecacheIds: number[];
-  watchedHlsPrecacheStreamIds: number[];
   streamMenuId: number | null;
   setStreamMenuId: React.Dispatch<React.SetStateAction<number | null>>;
   streamMenuRef: React.RefObject<HTMLDivElement>;
@@ -90,14 +84,11 @@ type StreamsPageProps = {
   restartingStreamIds: number[];
   rescanningStreamIds: number[];
   streamLiveUrl: (streamId: number) => string;
-  streamCachedUrl: (streamId: number) => string;
   shareableStreamUrl: (streamId: number) => string;
   getResolutionSummary: (items: Array<{ video_width?: number | null; video_height?: number | null }>) => string;
   openStreamPlayer: (streamId: number) => void;
   runStreamAction: (streamId: number, action: "start" | "stop" | "reboot") => void | Promise<unknown>;
   rescanStream: (streamId: number) => void | Promise<unknown>;
-  precacheStreamHls: (streamId: number) => void | Promise<unknown>;
-  cancelStreamHlsPrecache: (streamId: number) => void | Promise<unknown>;
   deleteStream: (streamId: number, streamName: string) => void;
   setConnectionsModalStreamId: React.Dispatch<React.SetStateAction<number | null>>;
 
@@ -112,8 +103,6 @@ type StreamsPageProps = {
   setEditingStreamShuffle: React.Dispatch<React.SetStateAction<boolean>>;
   editingStreamRestartOnSave: boolean;
   setEditingStreamRestartOnSave: React.Dispatch<React.SetStateAction<boolean>>;
-  editingStreamPrecacheHls: boolean;
-  setEditingStreamPrecacheHls: React.Dispatch<React.SetStateAction<boolean>>;
   editingStreamStatus: StreamStatus;
   setEditingStreamStatus: React.Dispatch<React.SetStateAction<StreamStatus>>;
   editingStreamTab: "artists" | "tracks";
@@ -177,8 +166,6 @@ export const StreamsPage = ({
   setStreamEncoding,
   streamShuffle,
   setStreamShuffle,
-  streamPrecacheHls,
-  setStreamPrecacheHls,
   streamSource,
   setStreamSource,
   streamTrackQuery,
@@ -203,9 +190,6 @@ export const StreamsPage = ({
   createStream,
   expandedStreamIds,
   toggleStreamExpanded,
-  streamHlsPrecacheStatus,
-  cancellingStreamHlsPrecacheIds,
-  watchedHlsPrecacheStreamIds,
   streamMenuId,
   setStreamMenuId,
   streamMenuRef,
@@ -216,14 +200,11 @@ export const StreamsPage = ({
   restartingStreamIds,
   rescanningStreamIds,
   streamLiveUrl,
-  streamCachedUrl,
   shareableStreamUrl,
   getResolutionSummary,
   openStreamPlayer,
   runStreamAction,
   rescanStream,
-  precacheStreamHls,
-  cancelStreamHlsPrecache,
   deleteStream,
   setConnectionsModalStreamId,
   editingStreamName,
@@ -236,8 +217,6 @@ export const StreamsPage = ({
   setEditingStreamShuffle,
   editingStreamRestartOnSave,
   setEditingStreamRestartOnSave,
-  editingStreamPrecacheHls,
-  setEditingStreamPrecacheHls,
   editingStreamStatus,
   setEditingStreamStatus,
   editingStreamTab,
@@ -292,8 +271,6 @@ export const StreamsPage = ({
         setStreamEncoding={setStreamEncoding}
         streamShuffle={streamShuffle}
         setStreamShuffle={setStreamShuffle}
-        streamPrecacheHls={streamPrecacheHls}
-        setStreamPrecacheHls={setStreamPrecacheHls}
         streamSource={streamSource}
         setStreamSource={setStreamSource}
         streamTrackQuery={streamTrackQuery}
@@ -326,9 +303,6 @@ export const StreamsPage = ({
         streamsLoading={streamsLoading}
         expandedStreamIds={expandedStreamIds}
         toggleStreamExpanded={toggleStreamExpanded}
-        streamHlsPrecacheStatus={streamHlsPrecacheStatus}
-        cancellingStreamHlsPrecacheIds={cancellingStreamHlsPrecacheIds}
-        watchedHlsPrecacheStreamIds={watchedHlsPrecacheStreamIds}
         streamMenuId={streamMenuId}
         setStreamMenuId={setStreamMenuId}
         streamMenuRef={streamMenuRef}
@@ -339,14 +313,11 @@ export const StreamsPage = ({
         restartingStreamIds={restartingStreamIds}
         rescanningStreamIds={rescanningStreamIds}
         streamLiveUrl={streamLiveUrl}
-        streamCachedUrl={streamCachedUrl}
         shareableStreamUrl={shareableStreamUrl}
         getResolutionSummary={getResolutionSummary}
         openStreamPlayer={openStreamPlayer}
         runStreamAction={runStreamAction}
         rescanStream={rescanStream}
-        precacheStreamHls={precacheStreamHls}
-        cancelStreamHlsPrecache={cancelStreamHlsPrecache}
         deleteStream={deleteStream}
         setConnectionsModalStreamId={setConnectionsModalStreamId}
       />
@@ -366,8 +337,6 @@ export const StreamsPage = ({
       setEditingStreamShuffle={setEditingStreamShuffle}
       editingStreamRestartOnSave={editingStreamRestartOnSave}
       setEditingStreamRestartOnSave={setEditingStreamRestartOnSave}
-      editingStreamPrecacheHls={editingStreamPrecacheHls}
-      setEditingStreamPrecacheHls={setEditingStreamPrecacheHls}
       editingStreamStatus={editingStreamStatus}
       setEditingStreamStatus={setEditingStreamStatus}
       editingStreamTab={editingStreamTab}

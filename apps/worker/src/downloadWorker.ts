@@ -162,36 +162,9 @@ const buildOutputDir = async (artistName?: string | null, albumTitle?: string | 
   return path.join(mediaRoot, artist, album);
 };
 
-const hlsSegmentDurationSeconds = 6;
-const hlsCacheDirName = ".mudarr-hls";
-const buildTrackHlsDir = (filePath: string, trackId: number) =>
-  path.join(path.dirname(filePath), hlsCacheDirName, `track-${trackId}`);
-
-type ActiveHlsSource = "precache" | "download";
-type ActiveHlsProcess = { child: ReturnType<typeof spawn>; source: ActiveHlsSource };
-const activeHlsProcesses = new Map<number, ActiveHlsProcess>();
-const cancelRequestedTracks = new Set<number>();
-
-const registerActiveHlsProcess = (
-  trackId: number,
-  source: ActiveHlsSource,
-  child: ReturnType<typeof spawn>
-) => {
-  activeHlsProcesses.set(trackId, { child, source });
-  const cleanup = () => {
-    const current = activeHlsProcesses.get(trackId);
-    if (current?.child === child) {
-      activeHlsProcesses.delete(trackId);
-    }
-  };
-  child.once("close", cleanup);
-  child.once("error", cleanup);
-};
-
-const runFfmpeg = (args: string[], options?: { onSpawn?: (child: ReturnType<typeof spawn>) => void }) =>
+const runFfmpeg = (args: string[]) =>
   new Promise<void>((resolve, reject) => {
     const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
-    options?.onSpawn?.(child);
     let stderr = "";
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -368,114 +341,6 @@ const ensureConcatCopyCompatibleMp4 = async (inputPath: string) => {
   return outputPath;
 };
 
-const segmentTrackToHls = async (trackId: number, filePath: string, source: ActiveHlsSource) => {
-  if (!filePath || !fs.existsSync(filePath)) {
-    throw new Error("HLS segmenting failed: file not found");
-  }
-  const outputDir = buildTrackHlsDir(filePath, trackId);
-  const playlistPath = path.join(outputDir, "playlist.m3u8");
-  const onSpawn = (child: ReturnType<typeof spawn>) => registerActiveHlsProcess(trackId, source, child);
-
-  const probe = await runFfprobeJson(filePath);
-  const summary = summarizeProbe(probe);
-  const hasVideo = Boolean(summary.videoCodec);
-  const hasAudio = Boolean(summary.audioCodec);
-  if (!hasVideo && !hasAudio) {
-    throw new Error("HLS segmenting failed: no audio/video streams detected");
-  }
-
-  const commonArgs = [
-    "-y",
-    "-hide_banner",
-    "-loglevel",
-    "error",
-    "-fflags",
-    "+genpts+discardcorrupt",
-    "-err_detect",
-    "ignore_err",
-    "-avoid_negative_ts",
-    "make_zero",
-    "-i",
-    filePath,
-    "-map",
-    "0:v?",
-    "-map",
-    "0:a?",
-    "-f",
-    "hls",
-    "-hls_time",
-    String(hlsSegmentDurationSeconds),
-    "-hls_list_size",
-    "0",
-    "-hls_segment_type",
-    "mpegts",
-    "-hls_segment_filename",
-    path.join(outputDir, "segment-%06d.ts"),
-    "-hls_flags",
-    "independent_segments+program_date_time+temp_file",
-    "-hls_playlist_type",
-    "vod",
-    playlistPath
-  ];
-
-  const ensureOutputDir = async () => {
-    await fsPromises.rm(outputDir, { recursive: true, force: true });
-    await fsPromises.mkdir(outputDir, { recursive: true });
-  };
-
-  // Attempt 1: stream copy (fastest).
-  try {
-    await ensureOutputDir();
-    const copyArgs = [
-      ...commonArgs,
-      "-c",
-      "copy"
-    ];
-    // When writing MPEG-TS segments, H.264 from MP4 often needs AnnexB.
-    if (hasVideo && summary.videoCodec === "h264") {
-      copyArgs.push("-bsf:v", "h264_mp4toannexb,dump_extra");
-    }
-    await runFfmpeg(copyArgs, { onSpawn });
-    return;
-  } catch (error) {
-    console.warn(`HLS copy segmenting failed for track ${trackId}; falling back to transcode`, error);
-  }
-
-  // Attempt 2: transcode to a consistent H.264/AAC profile for maximum compatibility.
-  await ensureOutputDir();
-  const transcodeArgs = [
-    ...commonArgs
-  ];
-  if (hasVideo) {
-    transcodeArgs.push(
-      "-c:v",
-      "libx264",
-      "-pix_fmt",
-      "yuv420p",
-      "-preset",
-      "veryfast",
-      "-crf",
-      "23",
-      // Improve segment boundary stability
-      "-force_key_frames",
-      `expr:gte(t,n_forced*${hlsSegmentDurationSeconds})`,
-      "-sc_threshold",
-      "0"
-    );
-  }
-  if (hasAudio) {
-    transcodeArgs.push("-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2");
-  }
-  // If one of the streams is absent, make sure we don't accidentally copy it.
-  if (!hasVideo) {
-    transcodeArgs.push("-vn");
-  }
-  if (!hasAudio) {
-    transcodeArgs.push("-an");
-  }
-  await runFfmpeg(transcodeArgs, { onSpawn });
-};
-
 const remuxToMp4 = async (inputPath: string) => {
   const dir = path.dirname(inputPath);
   const base = path.basename(inputPath, path.extname(inputPath));
@@ -515,35 +380,6 @@ const normalizeConcurrency = (value: unknown) => {
   if (rounded < 1) return null;
   return Math.min(rounded, 10);
 };
-
-const createConcurrencyLimiter = (limit: number) => {
-  const max = Math.max(1, Math.floor(limit) || 1);
-  let active = 0;
-  const queue: Array<() => void> = [];
-
-  const runNext = () => {
-    if (active >= max) return;
-    const next = queue.shift();
-    if (!next) return;
-    active += 1;
-    next();
-  };
-
-  return async <T,>(fn: () => Promise<T>): Promise<T> =>
-    await new Promise<T>((resolve, reject) => {
-      queue.push(() => {
-        fn().then(resolve, reject).finally(() => {
-          active -= 1;
-          runNext();
-        });
-      });
-      runNext();
-    });
-};
-
-const resolveHlsSegmentConcurrency = () =>
-  normalizeConcurrency(process.env.HLS_SEGMENT_CONCURRENCY) ?? 1;
-const hlsSegmentLimiter = createConcurrencyLimiter(resolveHlsSegmentConcurrency());
 
 type SearchSettings = {
   skipNonOfficialMusicVideos: boolean;
@@ -692,44 +528,10 @@ const downloadWorker = new Worker(
         remuxedPath,
         videoId
       ]);
-      try {
-        await hlsSegmentLimiter(async () => {
-          await segmentTrackToHls(trackId, remuxedPath, "download");
-          await pool.query(
-            "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-            ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
-          );
-        });
-      } catch (error) {
-        console.warn(`Failed to segment HLS for track ${trackId}`, error);
-        await pool.query(
-          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-          ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
-        );
-      }
       await pool.query(
         "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
         ["remux_completed", `Remuxed track ${trackId}`, { trackId, videoId }]
       );
-      return;
-    }
-
-    if (job.name === "hls-segment") {
-      const { trackId, filePath } = job.data as { trackId: number; filePath: string };
-      if (!filePath || !fs.existsSync(filePath)) {
-        throw new Error("HLS segmenting failed: file not found");
-      }
-      await hlsSegmentLimiter(async () => {
-        await pool.query(
-          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-          ["hls_segment_started", `Segmenting HLS for track ${trackId}`, { trackId }]
-        );
-        await segmentTrackToHls(trackId, filePath, "precache");
-        await pool.query(
-          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-          ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
-        );
-      });
       return;
     }
 
@@ -1071,24 +873,6 @@ const downloadWorker = new Worker(
             downloadJobId
           ]);
         }
-        const filePathForHls = resolvedFilePath;
-        if (filePathForHls) {
-          try {
-            await hlsSegmentLimiter(async () => {
-              await segmentTrackToHls(trackId, filePathForHls, "download");
-              await pool.query(
-                "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-                ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
-              );
-            });
-          } catch (error) {
-            console.warn(`Failed to segment HLS for track ${trackId}`, error);
-            await pool.query(
-              "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-              ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
-            );
-          }
-        }
       }
 
       // Best-effort cleanup of yt-dlp intermediate artifacts in the album folder.
@@ -1126,93 +910,4 @@ downloadWorker.on("failed", async (job, error) => {
   );
 });
 
-const hlsWorker = new Worker(
-  "hlsQueue",
-  async (job) => {
-    if (job.name !== "hls-segment") {
-      return;
-    }
-    const { trackId, filePath } = job.data as { trackId: number; filePath: string };
-    if (!filePath || !fs.existsSync(filePath)) {
-      await pool.query(
-        "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-        ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
-      );
-      throw new Error("HLS segmenting failed: file not found");
-    }
-
-    await hlsSegmentLimiter(async () => {
-      await pool.query(
-        "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-        ["hls_segment_started", `Segmenting HLS for track ${trackId}`, { trackId }]
-      );
-      try {
-        await segmentTrackToHls(trackId, filePath, "precache");
-        await pool.query(
-          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-          ["hls_segment_completed", `Segmented HLS for track ${trackId}`, { trackId }]
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const looksCancelled = /signal\s+sigterm|signal\s+sigkill/i.test(message);
-        const cancelled = cancelRequestedTracks.has(trackId) || looksCancelled;
-        if (cancelled) {
-          cancelRequestedTracks.delete(trackId);
-          await pool.query(
-            "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-            ["hls_segment_cancelled", `Cancelled HLS segmentation for track ${trackId}`, { trackId }]
-          );
-          return;
-        }
-        await pool.query(
-          "INSERT INTO activity_events (type, message, metadata) VALUES ($1, $2, $3)",
-          ["hls_segment_failed", `Failed to segment HLS for track ${trackId}`, { trackId }]
-        );
-        throw error;
-      }
-    });
-  },
-  {
-    connection,
-    concurrency: resolveHlsSegmentConcurrency()
-  }
-);
-
-const hlsControlWorker = new Worker(
-  "hlsControlQueue",
-  async (job) => {
-    if (job.name !== "hls-cancel") {
-      return;
-    }
-    const { trackId } = job.data as { trackId: number };
-    if (!Number.isFinite(trackId)) {
-      return;
-    }
-    cancelRequestedTracks.add(trackId);
-    setTimeout(() => cancelRequestedTracks.delete(trackId), 60_000);
-
-    const active = activeHlsProcesses.get(trackId);
-    if (!active || active.source !== "precache") {
-      return;
-    }
-    try {
-      active.child.kill("SIGTERM");
-      setTimeout(() => {
-        try {
-          const current = activeHlsProcesses.get(trackId);
-          if (current?.child === active.child) {
-            active.child.kill("SIGKILL");
-          }
-        } catch {
-          // ignore
-        }
-      }, 5000);
-    } catch {
-      // ignore failures to signal the process
-    }
-  },
-  { connection, concurrency: 5 }
-);
-
-export { hlsWorker, hlsControlWorker };
 export default downloadWorker;
