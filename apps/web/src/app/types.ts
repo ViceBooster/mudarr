@@ -245,6 +245,13 @@ export type StreamItem = {
   bit_rate: number | null;
 };
 
+export type StreamProbeSnapshot = {
+  updatedAt: string;
+  trackId: number | null;
+  data: unknown | null;
+  error: string | null;
+} | null;
+
 export type StreamSummary = {
   id: number;
   name: string;
@@ -269,6 +276,7 @@ export type StreamSummary = {
   audioCodecs: string[];
   videoCodecs: string[];
   connections: number;
+  streamProbe: StreamProbeSnapshot;
   clients: Array<{
     ip: string;
     userAgent: string | null;

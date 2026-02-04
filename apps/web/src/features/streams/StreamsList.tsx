@@ -64,6 +64,12 @@ type StreamsListStreamBase<TClient extends StreamClientBase, TItem extends Strea
   status: "active" | "stopped" | string;
   onlineSeconds: number | null;
   connections: number;
+  streamProbe?: {
+    updatedAt: string;
+    trackId: number | null;
+    data: unknown | null;
+    error: string | null;
+  } | null;
   clients: TClient[];
   items: TItem[];
   videoCodecs: string[];
@@ -377,6 +383,30 @@ export function StreamsList<
               )}
               {isExpanded && (
                 <>
+                  <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                      FFprobe (last 30s)
+                    </div>
+                    {stream.streamProbe ? (
+                      <>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          Updated {stream.streamProbe.updatedAt}
+                        </div>
+                        <pre className="mt-2 max-h-52 overflow-auto rounded-md bg-slate-900/90 p-2 text-[10px] text-slate-100">
+                          {JSON.stringify(
+                            stream.streamProbe.data ??
+                              (stream.streamProbe.error
+                                ? { error: stream.streamProbe.error }
+                                : { error: "No data" }),
+                            null,
+                            2
+                          )}
+                        </pre>
+                      </>
+                    ) : (
+                      <div className="mt-2 text-xs text-slate-500">No probe data yet.</div>
+                    )}
+                  </div>
                   <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
                     <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                       Connections

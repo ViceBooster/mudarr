@@ -87,6 +87,17 @@ type StreamClientInfo = {
 const execFileAsync = promisify(execFile);
 const streamClients = new Map<number, Map<string, StreamClientInfo>>();
 const clientTimeoutMs = 30000;
+const streamProbeTtlMs = 30_000;
+const streamProbeCache = new Map<
+  number,
+  {
+    updatedAt: number;
+    trackId: number | null;
+    filePath: string | null;
+    data: unknown | null;
+    error: string | null;
+  }
+>();
 
 type HlsSession = {
   sessionId: number;
@@ -192,6 +203,80 @@ const isFfmpegForStream = async (pid: number, dir: string) => {
     return command.includes("ffmpeg") && command.includes(dir);
   } catch {
     return false;
+  }
+};
+
+const runStreamFfprobe = async (filePath: string) => {
+  const { stdout } = await execFileAsync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-print_format",
+      "json",
+      "-show_format",
+      "-show_streams",
+      filePath
+    ],
+    { maxBuffer: 1024 * 1024, timeout: 5000 }
+  );
+  return JSON.parse(stdout || "{}") as unknown;
+};
+
+const getStreamProbeSnapshot = async (
+  streamId: number,
+  current: { trackId: number; filePath: string } | null
+) => {
+  if (!current?.filePath) {
+    return null;
+  }
+  const now = Date.now();
+  const cached = streamProbeCache.get(streamId);
+  const sameTrack =
+    cached &&
+    cached.trackId === current.trackId &&
+    cached.filePath === current.filePath &&
+    now - cached.updatedAt < streamProbeTtlMs;
+  if (sameTrack && cached) {
+    return {
+      updatedAt: new Date(cached.updatedAt).toISOString(),
+      trackId: cached.trackId,
+      data: cached.data,
+      error: cached.error
+    };
+  }
+  try {
+    const data = await runStreamFfprobe(current.filePath);
+    const next = {
+      updatedAt: now,
+      trackId: current.trackId,
+      filePath: current.filePath,
+      data,
+      error: null
+    };
+    streamProbeCache.set(streamId, next);
+    return {
+      updatedAt: new Date(next.updatedAt).toISOString(),
+      trackId: next.trackId,
+      data: next.data,
+      error: next.error
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "ffprobe failed";
+    const next = {
+      updatedAt: now,
+      trackId: current.trackId,
+      filePath: current.filePath,
+      data: null,
+      error: message
+    };
+    streamProbeCache.set(streamId, next);
+    return {
+      updatedAt: new Date(next.updatedAt).toISOString(),
+      trackId: next.trackId,
+      data: next.data,
+      error: next.error
+    };
   }
 };
 
@@ -1520,25 +1605,26 @@ const buildStreamResponse = async (stream: {
   const seededRandom = createSeededRandom(Math.floor(seedBase / 1000));
 
   const items = await loadStreamItems(stream.id);
-  const itemDetails = await Promise.all(
+  const itemStates = await Promise.all(
     items.map(async (item) => {
       if (!item.file_path) {
-      return {
-        id: item.item_id,
-        position: item.position,
-        track_id: item.track_id,
-        title: item.title,
-        album_title: item.album_title,
-        artist_name: item.artist_name,
-        available: false,
-        bytes: null,
-        duration: null,
-        audio_codec: null,
-        video_codec: null,
-        video_width: null,
-        video_height: null,
-        bit_rate: null
-      };
+        return {
+          id: item.item_id,
+          position: item.position,
+          track_id: item.track_id,
+          title: item.title,
+          album_title: item.album_title,
+          artist_name: item.artist_name,
+          file_path: null,
+          available: false,
+          bytes: null,
+          duration: null,
+          audio_codec: null,
+          video_codec: null,
+          video_width: null,
+          video_height: null,
+          bit_rate: null
+        };
       }
       const info = await getMediaInfo(item.file_path);
       return {
@@ -1548,6 +1634,7 @@ const buildStreamResponse = async (stream: {
         title: item.title,
         album_title: item.album_title,
         artist_name: item.artist_name,
+        file_path: item.file_path,
         available: info.bytes !== null,
         bytes: info.bytes,
         duration: info.duration,
@@ -1567,7 +1654,7 @@ const buildStreamResponse = async (stream: {
   const audioCodecs = new Set<string>();
   const videoCodecs = new Set<string>();
 
-  for (const item of itemDetails) {
+  for (const item of itemStates) {
     if (!item.available) {
       missingCount += 1;
       continue;
@@ -1593,9 +1680,10 @@ const buildStreamResponse = async (stream: {
     artistName: string | null;
     albumTitle: string | null;
   } | null = null;
+  let currentTrackItem: { trackId: number; filePath: string } | null = null;
 
   if (stream.status === "active" && onlineSeconds !== null) {
-    const ordered = orderStreamItems(itemDetails, stream.shuffle, seededRandom);
+    const ordered = orderStreamItems(itemStates, stream.shuffle, seededRandom);
     const totalDuration = ordered.reduce(
       (sum, item) => sum + (item.duration ?? 0),
       0
@@ -1614,6 +1702,9 @@ const buildStreamResponse = async (stream: {
             artistName: item.artist_name,
             albumTitle: item.album_title
           };
+          if (item.file_path) {
+            currentTrackItem = { trackId: item.track_id, filePath: item.file_path };
+          }
           break;
         }
         offset -= duration;
@@ -1622,6 +1713,8 @@ const buildStreamResponse = async (stream: {
   }
 
   const clients = getActiveStreamClients(stream.id);
+  const streamProbe = await getStreamProbeSnapshot(stream.id, currentTrackItem);
+  const itemDetails = itemStates.map(({ file_path: _filePath, ...rest }) => rest);
 
   return {
     id: stream.id,
@@ -1642,6 +1735,7 @@ const buildStreamResponse = async (stream: {
     audioCodecs: Array.from(audioCodecs),
     videoCodecs: Array.from(videoCodecs),
     connections: clients.length,
+    streamProbe,
     clients: clients.map((client) => ({
       ip: client.ip,
       userAgent: client.userAgent,
