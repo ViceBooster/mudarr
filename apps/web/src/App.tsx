@@ -387,6 +387,26 @@ export default function App() {
     return [];
   }, [streamingStatsHistory, dashboardStats]);
 
+  const cpuUsageSeries = useMemo(() => {
+    if (streamingStatsHistory.length > 0) {
+      return streamingStatsHistory.map((entry) => entry.cpuUsagePercent);
+    }
+    if (dashboardStats) {
+      return [dashboardStats.cpuUsagePercent];
+    }
+    return [];
+  }, [streamingStatsHistory, dashboardStats]);
+
+  const memoryUsageSeries = useMemo(() => {
+    if (streamingStatsHistory.length > 0) {
+      return streamingStatsHistory.map((entry) => entry.memoryUsagePercent);
+    }
+    if (dashboardStats) {
+      return [dashboardStats.memoryUsagePercent];
+    }
+    return [];
+  }, [streamingStatsHistory, dashboardStats]);
+
   const isStreamCreateRoute = useMemo(
     () => location.pathname === streamCreateRoute,
     [location.pathname]
@@ -1731,6 +1751,8 @@ export default function App() {
       latestStreamingSample,
       activeConnectionsSeries,
       bandwidthSeries,
+      cpuUsageSeries,
+      memoryUsageSeries,
       artistSortKey,
       artistSortDirection,
       toggleArtistSort,

@@ -4,8 +4,10 @@ import { Router } from "express";
 import { getStreamBandwidthBps } from "../services/streamMetrics.js";
 import { getActiveConnectionsCount } from "./streams.js";
 import pool from "../db/pool.js";
+import { getMemoryUsagePercent, sampleCpuUsagePercent, type CpuSnapshot } from "../services/systemStats.js";
 
 const router = Router();
+let lastCpuSnapshot: CpuSnapshot | null = null;
 
 router.get("/history", async (_req, res) => {
   try {
@@ -13,7 +15,9 @@ router.get("/history", async (_req, res) => {
       SELECT
         (EXTRACT(EPOCH FROM sampled_at) * 1000)::bigint AS timestamp,
         active_connections,
-        bandwidth_bps
+        bandwidth_bps,
+        cpu_usage_percent,
+        memory_usage_percent
       FROM stats_samples
       WHERE sampled_at >= NOW() - INTERVAL '4 hours'
       ORDER BY sampled_at ASC
@@ -21,7 +25,9 @@ router.get("/history", async (_req, res) => {
     const samples = result.rows.map((row) => ({
       timestamp: Number(row.timestamp),
       activeConnections: Number(row.active_connections ?? 0),
-      bandwidthBps: Number(row.bandwidth_bps ?? 0)
+      bandwidthBps: Number(row.bandwidth_bps ?? 0),
+      cpuUsagePercent: Number(row.cpu_usage_percent ?? 0),
+      memoryUsagePercent: Number(row.memory_usage_percent ?? 0)
     }));
     res.json(samples);
   } catch (error: any) {
@@ -83,7 +89,13 @@ router.get("/", async (_req, res) => {
     diskTotalBytes,
     diskFreeBytes,
     activeConnections: getActiveConnectionsCount(),
-    bandwidthBps: getStreamBandwidthBps()
+    bandwidthBps: getStreamBandwidthBps(),
+    cpuUsagePercent: (() => {
+      const cpuSample = sampleCpuUsagePercent(lastCpuSnapshot);
+      lastCpuSnapshot = cpuSample.snapshot;
+      return cpuSample.percent;
+    })(),
+    memoryUsagePercent: getMemoryUsagePercent()
   });
 });
 

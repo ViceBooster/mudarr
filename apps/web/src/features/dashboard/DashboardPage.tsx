@@ -26,11 +26,15 @@ type DashboardStats = {
   artists: number;
   activeConnections: number;
   bandwidthBps: number;
+  cpuUsagePercent: number;
+  memoryUsagePercent: number;
 };
 
 type StreamingSample = {
   activeConnections?: number | null;
   bandwidthBps?: number | null;
+  cpuUsagePercent?: number | null;
+  memoryUsagePercent?: number | null;
 };
 
 type DashboardArtist = {
@@ -50,6 +54,8 @@ type DashboardPageProps = {
   latestStreamingSample: StreamingSample | null;
   activeConnectionsSeries: number[];
   bandwidthSeries: number[];
+  cpuUsageSeries: number[];
+  memoryUsageSeries: number[];
 
   artistSortKey: "name" | "created_at";
   artistSortDirection: "asc" | "desc";
@@ -90,6 +96,8 @@ export const DashboardPage = ({
   latestStreamingSample,
   activeConnectionsSeries,
   bandwidthSeries,
+  cpuUsageSeries,
+  memoryUsageSeries,
   artistSortKey,
   artistSortDirection,
   toggleArtistSort,
@@ -117,7 +125,7 @@ export const DashboardPage = ({
   deleteArtist
 }: DashboardPageProps) => (
   <section className="space-y-6">
-    <div className={`grid gap-4 ${streamsEnabled ? "md:grid-cols-4" : "md:grid-cols-2"}`}>
+    <div className={`grid gap-4 ${streamsEnabled ? "md:grid-cols-6" : "md:grid-cols-4"}`}>
       <div className="rounded-xl bg-white p-4 shadow-sm">
         <div className="text-xs text-slate-500">Disk used</div>
         <div className="text-2xl font-semibold text-slate-900">
@@ -157,6 +165,46 @@ export const DashboardPage = ({
         <div className="text-xs text-slate-500">Artists saved</div>
         <div className="text-2xl font-semibold text-slate-900">
           {dashboardStats?.artists ?? artistsCount}
+        </div>
+      </div>
+      <div className="relative overflow-hidden rounded-xl bg-white p-4 shadow-sm">
+        <div className="pointer-events-none absolute inset-0 opacity-70">
+          <Sparkline
+            values={cpuUsageSeries}
+            strokeClassName="stroke-amber-500"
+            gradientFrom="#f59e0b"
+            gradientTo="#fef3c7"
+          />
+        </div>
+        <div className="relative z-10">
+          <div className="text-xs text-slate-500">CPU usage</div>
+          <div className="text-2xl font-semibold text-slate-900">
+            {typeof latestStreamingSample?.cpuUsagePercent === "number"
+              ? `${Math.round(latestStreamingSample.cpuUsagePercent)}%`
+              : dashboardStats
+                ? `${Math.round(dashboardStats.cpuUsagePercent)}%`
+                : "—"}
+          </div>
+        </div>
+      </div>
+      <div className="relative overflow-hidden rounded-xl bg-white p-4 shadow-sm">
+        <div className="pointer-events-none absolute inset-0 opacity-70">
+          <Sparkline
+            values={memoryUsageSeries}
+            strokeClassName="stroke-violet-500"
+            gradientFrom="#8b5cf6"
+            gradientTo="#ede9fe"
+          />
+        </div>
+        <div className="relative z-10">
+          <div className="text-xs text-slate-500">Memory usage</div>
+          <div className="text-2xl font-semibold text-slate-900">
+            {typeof latestStreamingSample?.memoryUsagePercent === "number"
+              ? `${Math.round(latestStreamingSample.memoryUsagePercent)}%`
+              : dashboardStats
+                ? `${Math.round(dashboardStats.memoryUsagePercent)}%`
+                : "—"}
+          </div>
         </div>
       </div>
       {streamsEnabled && (

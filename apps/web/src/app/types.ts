@@ -307,12 +307,16 @@ export type DashboardStats = {
   diskFreeBytes: number | null;
   activeConnections: number;
   bandwidthBps: number;
+  cpuUsagePercent: number;
+  memoryUsagePercent: number;
 };
 
 export type DashboardStatsSample = {
   timestamp: number;
   activeConnections: number;
   bandwidthBps: number;
+  cpuUsagePercent: number;
+  memoryUsagePercent: number;
 };
 
 export type PlaybackItem = {

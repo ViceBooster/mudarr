@@ -766,8 +766,8 @@ const streamConcatenated = (
   }
   args.push(
     "-max_muxing_queue_size", "1024",
-    "-max_interleave_delta", "0",
-    "-avoid_negative_ts", "make_zero",
+    "-max_interleave_delta", "500000",
+    "-avoid_negative_ts", "make_non_negative",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof",
     "-f", "mp4",
     "pipe:1"
@@ -1058,9 +1058,9 @@ const runHlsConcatenated = async (
     "+genpts+discardcorrupt",
     "-err_detect",
     "ignore_err",
-    // Force all timestamps to be non-negative to avoid PTS/DTS discontinuities at track boundaries
+    // Conservative shift so leading negative timestamps are non-negative; keeps A/V in sync at concat boundaries (make_zero can desync)
     "-avoid_negative_ts",
-    "make_zero"
+    "make_non_negative"
   ];
   if (protocolWhitelist) {
     args.push("-protocol_whitelist", protocolWhitelist);
@@ -1139,6 +1139,8 @@ const runHlsConcatenated = async (
   args.push("-map", "0:v?", "-map", "0:a?");
 
   if (actualEncoding !== "copy") {
+    // Keep A/V in sync when concatenating: constant frame rate and sync audio to video
+    args.push("-vsync", "cfr", "-async", "1");
     // Align segment boundaries to forced keyframes for stable HLS playback.
     args.push("-force_key_frames", hlsForceKeyFrameExpr, "-sc_threshold", "0");
   }
@@ -1146,8 +1148,8 @@ const runHlsConcatenated = async (
     "-max_muxing_queue_size", "2048",
     "-muxpreload", "0",
     "-muxdelay", "0",
-    // Disable packet interleaving to avoid timestamp reordering issues at concat boundaries
-    "-max_interleave_delta", "0"
+    // Allow modest interleaving (0.5s) at concat boundaries so A and V can align; 0 can cause desync
+    "-max_interleave_delta", "500000"
   );
 
   // TS segments are the default for broad compatibility with IPTV restreamers.
