@@ -28,7 +28,8 @@ const migrations = [
   { name: "stream_enabled", file: "migrations/016_stream_enabled.sql" },
   { name: "stats_samples", file: "migrations/017_stats_samples.sql" },
   { name: "admin_users", file: "migrations/018_admin_users.sql" },
-  { name: "search_settings", file: "migrations/019_search_settings.sql" }
+  { name: "search_settings", file: "migrations/019_search_settings.sql" },
+  { name: "dashboard_stats_samples", file: "migrations/020_dashboard_stats_samples.sql" }
 ];
 
 export async function runMigrations() {
